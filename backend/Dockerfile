@@ -3,7 +3,7 @@
 # deployment pin both stages by digest:
 #   docker pull node:22-alpine   # then `docker manifest inspect` for the digest
 #   FROM node:22-alpine@sha256:<digest>
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 COPY package*.json ./
 # --ignore-scripts: no dependency here needs install scripts, and none ever
@@ -14,7 +14,7 @@ COPY src ./src
 RUN npm run build
 
 # ---- run ----
-FROM node:22-alpine
+FROM node:26-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package*.json ./
