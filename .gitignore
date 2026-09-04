@@ -1,0 +1,45 @@
+# Android / Gradle
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Node (backend has its own finer-grained .gitignore too)
+node_modules/
+dist/
+*.log
+
+# Secrets — never commit
+.env
+*.keystore
+!debug.keystore
+
+# Mutation testing / coverage artifacts
+backend/reports/
+backend/.stryker-tmp/
+core/build/reports/pitest/
+
+# --- hygiene additions (2026-09 audit) ---
+# Backend HTML coverage reports (regenerated locally)
+backend/coverage/
+# UI audit evidence: keep the report, not 12 MB of PNGs
+ui-audit/fixes/
+ui-audit/screenshots/
+ui-audit/crops/
+# Kotlin 2.x session data
+.kotlin/
+# Internal agent workspace
+.zcode/
+# Never commit keystores or built artifacts (*.keystore already covered)
+*.jks
+!*.keystore.example
+*.apk
+*.aab
+# Env variants beyond the literal .env
+.env.*
+!backend/.env.example

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome status-bar icon: small icons must be alpha masks, so this is a
+     single-path cloud with a peeking sun — recognizable at 24dp, flattens to
+     nothing garish in the shade. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7.5,18.5 h9.6 a3.9,3.9 0 0 0 0.5,-7.77 A5.6,5.6 0 0 0 7.05,9.2 A4.35,4.35 0 0 0 7.5,18.5 Z M11.2,4.6 a1.1,1.1 0 0 1 1.1,-1.1 A1.1,1.1 0 0 1 13.4,4.6 V6.0 a1.1,1.1 0 0 1 -1.1,1.1 A1.1,1.1 0 0 1 11.2,6.0 Z M16.4,6.2 a1.1,1.1 0 0 1 1.55,0 A1.1,1.1 0 0 1 17.95,7.75 L17.0,8.75 A1.1,1.1 0 0 1 15.45,8.75 A1.1,1.1 0 0 1 15.45,7.2 Z M6.0,6.2 A1.1,1.1 0 0 0 4.45,6.2 A1.1,1.1 0 0 0 4.45,7.75 L5.4,8.75 A1.1,1.1 0 0 0 6.95,8.75 A1.1,1.1 0 0 0 6.95,7.2 Z" />
+</vector>

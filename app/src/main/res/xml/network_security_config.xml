@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Production deployments serve the backend over HTTPS — a shipped artifact
+  allows no cleartext anywhere. Loopback development access is a debug-only
+  overlay (see app/src/debug/res/xml/network_security_config.xml).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

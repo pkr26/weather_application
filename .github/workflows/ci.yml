@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref: a full Stryker pass per push is
+# expensive, and only the newest commit matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: everything here is read-only plus artifact writes.
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend — typecheck · test · mutation · audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Unit tests (per-file coverage gate at 98%)
+        run: npm run test:coverage
+      - name: Mutation testing (Stryker — gate at 98% of scored mutants)
+        run: npm run mutation
+      - name: Dependency audit (fails on moderate+)
+        run: npm run audit
+
+  android:
+    name: Android — tests · mutation · lint · debug+release build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Gradle wrapper (supply-chain: the jar runs on every build)
+        uses: gradle/actions/wrapper-validation-action@v3
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          dependency-graph: generate-and-submit
+      - name: Unit tests
+        run: ./gradlew :core:test :app:testDebugUnitTest
+      - name: Lint
+        run: ./gradlew :app:lintDebug
+      - name: Mutation testing (PIT — gate at 98% score)
+        run: ./gradlew :core:pitest
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug
+      # The minified release build is the one users get — R8/serialization
+      # keep-rule breakage only shows up at runtime, so build it every push.
+      - name: Assemble release (R8 smoke build, debug-signed)
+        run: ./gradlew :app:assembleRelease -PapiBaseUrl=https://ci.example.invalid/api/v1/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cirrus-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7

@@ -1,0 +1,181 @@
+<resources>
+    <string name="app_name">Cirrus</string>
+
+    <!-- Shared -->
+    <string name="close_cd">Close</string>
+    <string name="clear_cd">Clear</string>
+    <string name="search_cd">Search</string>
+    <string name="refresh_cd">Refresh</string>
+    <string name="saved_cities_cd">Saved cities</string>
+    <string name="try_again">Try Again</string>
+    <string name="save">Save</string>
+    <string name="no_data">No data right now.</string>
+    <string name="selected_cd">Selected</string>
+
+    <!-- First-run onboarding -->
+    <string name="onboarding_title">Use your location?</string>
+    <string name="onboarding_message">Cirrus can show live weather for wherever you are. You can change this anytime from the city list.</string>
+    <string name="onboarding_use_location">Use my location</string>
+    <string name="onboarding_not_now">Not now</string>
+
+    <!-- Weather home -->
+    <string name="loading_tagline">Fetching your forecast…</string>
+    <string name="error_offline">Can\'t reach the weather service. Check your connection and try again.</string>
+    <string name="error_generic">Something went wrong loading the forecast.</string>
+    <string name="stale_banner">Couldn\'t refresh — showing the last forecast</string>
+    <string name="footer_weather_for">Weather for %1$s</string>
+    <string name="footer_updated">Updated %1$s · Data by Google Weather API</string>
+
+    <!-- Hero -->
+    <string name="hero_high">H:%1$s°</string>
+    <string name="hero_low">L:%1$s°</string>
+    <string name="hero_past_high">Past 24h H:%1$s°</string>
+    <string name="hero_past_low">Past 24h L:%1$s°</string>
+
+    <!-- Hourly forecast -->
+    <string name="hourly_title">HOURLY FORECAST</string>
+    <string name="hourly_expanded_cd">Hourly forecast, expanded</string>
+    <string name="hourly_collapsed_cd">Hourly forecast, tap to see all hours</string>
+    <string name="hourly_empty">No hourly forecast available right now.</string>
+    <string name="hourly_curve_cd">Temperature curve for the next 24 hours</string>
+    <string name="now">Now</string>
+    <string name="sunset">Sunset</string>
+    <string name="hourly_column_cd">%1$s, %2$s degrees</string>
+    <string name="hourly_column_precip_cd">, %1$d%% chance of precipitation</string>
+
+    <!-- Daily forecast -->
+    <string name="daily_title">%1$d-DAY FORECAST</string>
+    <string name="daily_empty">No daily forecast available right now.</string>
+    <string name="today">Today</string>
+    <string name="tomorrow">Tomorrow</string>
+    <string name="row_expanded">Expanded</string>
+    <string name="row_collapsed">Collapsed</string>
+    <string name="detail_day">Day</string>
+    <string name="detail_night">Night</string>
+    <string name="detail_sunrise">Sunrise</string>
+    <string name="detail_sunset">Sunset</string>
+    <string name="detail_feels_like">Feels like</string>
+
+    <!-- Modules: UV -->
+    <string name="uv_index">UV INDEX</string>
+    <string name="uv_index_cd">%1$s UV index</string>
+    <string name="uv_low">Low</string>
+    <string name="uv_moderate">Moderate</string>
+    <string name="uv_high">High</string>
+    <string name="uv_very_high">Very High</string>
+    <string name="uv_extreme">Extreme</string>
+    <string name="uv_no_data">No UV data right now.</string>
+    <string name="uv_peak">Peak %1$s today around %2$s.</string>
+    <string name="uv_no_more">No UV data for the rest of the day.</string>
+
+    <!-- Modules: wind -->
+    <string name="wind">WIND</string>
+    <string name="wind_from">%1$s wind</string>
+    <string name="wind_gusts">Gusts to %1$s</string>
+    <string name="wind_none">No wind data right now.</string>
+
+    <!-- Modules: feels like -->
+    <string name="feels_like">FEELS LIKE</string>
+    <string name="feels_delta_vs_actual">vs actual</string>
+    <string name="feels_warmer">Humidity is making it feel warmer.</string>
+    <string name="feels_cooler">Wind is making it feel cooler.</string>
+    <string name="feels_same">Similar to the actual temperature.</string>
+
+    <!-- Modules: precipitation -->
+    <string name="precipitation">PRECIPITATION</string>
+    <string name="precip_last_24h">in the last 24h</string>
+    <string name="precip_next_hour">Next hour: %1$d%% chance of precipitation.</string>
+    <string name="precip_no_next">No forecast for the next hour yet.</string>
+    <string name="precip_chance_na">Precipitation chance unavailable for the next hour.</string>
+
+    <!-- Modules: humidity -->
+    <string name="humidity">HUMIDITY</string>
+    <string name="dew_point_now">The dew point is %1$s right now.</string>
+    <string name="dew_point_unavailable">Dew point unavailable right now.</string>
+
+    <!-- Modules: visibility -->
+    <string name="visibility">VISIBILITY</string>
+    <string name="vis_perfect">It\'s perfectly clear right now.</string>
+    <string name="vis_clear">It\'s clear right now.</string>
+    <string name="vis_hazy">It\'s slightly hazy right now.</string>
+    <string name="vis_low">Visibility is low right now.</string>
+
+    <!-- Modules: pressure -->
+    <string name="pressure">PRESSURE</string>
+    <string name="pressure_trend">The pressure is %1$s right now.</string>
+    <string name="pressure_rising">rising</string>
+    <string name="pressure_falling">falling</string>
+    <string name="pressure_steady">steady</string>
+
+    <!-- Modules: sun -->
+    <string name="sunset_header">SUNSET</string>
+    <string name="sunrise_header">SUNRISE</string>
+    <string name="sun_secondary_sunrise">Sunrise: %1$s</string>
+    <string name="sun_secondary_sunset">Sunset: %1$s</string>
+    <string name="sun_none">No sun times right now.</string>
+
+    <!-- Modules: moon -->
+    <string name="moon">MOON</string>
+    <string name="moon_footer">The moon is a %1$s.</string>
+    <string name="moon_new">New Moon</string>
+    <string name="moon_waxing_crescent">Waxing Crescent</string>
+    <string name="moon_first_quarter">First Quarter</string>
+    <string name="moon_waxing_gibbous">Waxing Gibbous</string>
+    <string name="moon_full">Full Moon</string>
+    <string name="moon_waning_gibbous">Waning Gibbous</string>
+    <string name="moon_last_quarter">Last Quarter</string>
+    <string name="moon_waning_crescent">Waning Crescent</string>
+    <string name="moon_unknown">Moon</string>
+
+    <!-- Modules: cloud cover -->
+    <string name="cloud_cover">CLOUD COVER</string>
+    <string name="cloud_overcast">Completely overcast.</string>
+    <string name="cloud_mostly">Mostly covered by clouds.</string>
+    <string name="cloud_partly">Partly covered by clouds.</string>
+    <string name="cloud_clear">Mostly clear skies.</string>
+
+    <!-- City list -->
+    <string name="my_locations">MY LOCATIONS</string>
+    <string name="search_placeholder">Search for a city</string>
+    <string name="use_my_location_cd">Use my location</string>
+    <string name="notification_settings_cd">Notification settings</string>
+    <string name="searching">Searching…</string>
+    <string name="no_matches">No cities found for \"%1$s\"</string>
+    <string name="search_failed">City search failed — tap to retry</string>
+    <string name="my_location">My Location</string>
+    <string name="cities_empty">No saved cities yet — search above to add one.</string>
+    <string name="empty_home_message">No cities yet — add one to see the weather.</string>
+    <string name="empty_home_add_city">Add a city</string>
+    <string name="cancel">Cancel</string>
+    <string name="notifications_blocked">Notifications are blocked for Cirrus — enable them in system settings to receive briefings and alerts.</string>
+    <string name="open_app_settings">Open settings</string>
+    <string name="delete_city_cd">Delete %1$s</string>
+    <string name="retry_mini_cd">Retry loading conditions for %1$s</string>
+    <string name="delete_confirm_title">Remove %1$s?</string>
+    <string name="delete_confirm_text">This removes it from your saved cities.</string>
+    <string name="delete_confirm_yes">Remove</string>
+    <string name="alert_until">Until %1$s</string>
+    <string name="cities_reset_banner">Couldn\'t restore your saved cities — showing defaults.</string>
+
+    <!-- Settings -->
+    <string name="notifications_title">Notifications</string>
+    <string name="briefing_title">Daily forecast briefing</string>
+    <string name="briefing_subtitle">A morning summary of what today\'s weather will bring</string>
+    <string name="delivery_time">Delivery time</string>
+    <string name="notif_language">Notification language</string>
+    <string name="preview">Preview</string>
+    <string name="preview_body">See what the briefing looks like right now, in the language you selected.</string>
+    <string name="send_test">Send test notification</string>
+    <string name="send_test_sending">Sending…</string>
+    <string name="test_sent">Test notification sent</string>
+    <string name="test_failed">Couldn\'t send the test — check your connection</string>
+    <string name="alerts_footnote">Severe weather alerts are delivered automatically while the daily briefing is enabled. Notification content is composed by the Cirrus backend in your chosen language.</string>
+    <string name="language_dialog_title">Notification language</string>
+    <string name="time_dialog_title">Briefing time</string>
+
+    <!-- Notification channels (system settings) -->
+    <string name="channel_briefing_name">Daily forecast</string>
+    <string name="channel_briefing_desc">Your daily summary of what today\'s weather will bring.</string>
+    <string name="channel_alerts_name">Severe weather alerts</string>
+    <string name="channel_alerts_desc">Warnings for active severe weather at your location.</string>
+</resources>

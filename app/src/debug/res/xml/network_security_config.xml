@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug builds only: cleartext is allowed everywhere so a physical device
+  can point API_BASE_URL at any LAN machine (http://192.168.x.x:8080/...).
+  Release keeps the strict main/ config (loopback/emulator host only).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
