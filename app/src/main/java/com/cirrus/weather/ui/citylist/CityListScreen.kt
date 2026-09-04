@@ -12,8 +12,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.minimumInteractiveComponentSize
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -41,6 +42,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,16 +81,20 @@ fun CityListScreen(
     onLocateMe: () -> Unit,
     onOpenSettings: () -> Unit = {},
 ) {
-    val cities by viewModel.cities.collectAsState()
-    val mini by viewModel.mini.collectAsState()
-    val activeId by viewModel.activeId.collectAsState()
-    val query by viewModel.query.collectAsState()
-    val search by viewModel.search.collectAsState()
-    val unitPref by viewModel.unitPref.collectAsState()
-    val storageReset by viewModel.storageReset.collectAsState()
+    val cities by viewModel.cities.collectAsStateWithLifecycle()
+    val mini by viewModel.mini.collectAsStateWithLifecycle()
+    val activeId by viewModel.activeId.collectAsStateWithLifecycle()
+    val query by viewModel.query.collectAsStateWithLifecycle()
+    val search by viewModel.search.collectAsStateWithLifecycle()
+    val unitPref by viewModel.unitPref.collectAsStateWithLifecycle()
+    val storageReset by viewModel.storageReset.collectAsStateWithLifecycle()
 
     // Deleting is a destructive, unrecoverable action — it always confirms.
-    var pendingDelete by rememberSaveable { mutableStateOf<SavedCity?>(null) }
+    // Only the id is saved (a SavedCity is neither Parcelable nor
+    // java.io.Serializable, so saving the object itself would crash at
+    // save-time); the object is re-resolved from the live list.
+    var pendingDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
+    val pendingDelete = pendingDeleteId?.let { id -> cities.firstOrNull { it.id == id } }
     var resetBannerDismissed by rememberSaveable { mutableStateOf(false) }
 
     Box(
@@ -104,7 +110,10 @@ fun CityListScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
-                .navigationBarsPadding(),
+                .navigationBarsPadding()
+                // The keyboard must never cover search results on short
+                // screens — edge-to-edge means insets are ours to apply.
+                .imePadding(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(
                 start = 16.dp, end = 16.dp, top = 12.dp, bottom = 24.dp,
             ),
@@ -228,7 +237,7 @@ fun CityListScreen(
                             },
                             onRetryMini = { viewModel.retryMini(city) },
                             onDelete = if (city.isDeviceLocation) null else {
-                                { pendingDelete = city }
+                                { pendingDeleteId = city.id }
                             },
                         )
                     }
@@ -239,19 +248,19 @@ fun CityListScreen(
 
     pendingDelete?.let { city ->
         AlertDialog(
-            onDismissRequest = { pendingDelete = null },
+            onDismissRequest = { pendingDeleteId = null },
             title = { Text(stringResource(R.string.delete_confirm_title, city.displayName)) },
             text = { Text(stringResource(R.string.delete_confirm_text)) },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.delete(city)
-                    pendingDelete = null
+                    pendingDeleteId = null
                 }) {
                     Text(stringResource(R.string.delete_confirm_yes))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) {
+                TextButton(onClick = { pendingDeleteId = null }) {
                     Text(stringResource(R.string.cancel))
                 }
             },
@@ -276,7 +285,12 @@ private fun StorageResetBanner(onDismiss: () -> Unit, modifier: Modifier = Modif
             color = Color.White.copy(alpha = 0.92f),
             modifier = Modifier.weight(1f),
         )
-        IconButton(onClick = onDismiss, modifier = Modifier.size(40.dp)) {
+        IconButton(
+            onClick = onDismiss,
+            // Minimum 48dp touch target: the visual 40dp box grows to the
+            // Material minimum without enlarging the banner.
+            modifier = Modifier.minimumInteractiveComponentSize(),
+        ) {
             Icon(
                 Icons.Filled.Close,
                 contentDescription = stringResource(R.string.close_cd),

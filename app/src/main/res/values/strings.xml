@@ -143,6 +143,7 @@
     <string name="no_matches">No cities found for \"%1$s\"</string>
     <string name="search_failed">City search failed — tap to retry</string>
     <string name="my_location">My Location</string>
+    <string name="alert_generic">Weather alert</string>
     <string name="cities_empty">No saved cities yet — search above to add one.</string>
     <string name="empty_home_message">No cities yet — add one to see the weather.</string>
     <string name="empty_home_add_city">Add a city</string>

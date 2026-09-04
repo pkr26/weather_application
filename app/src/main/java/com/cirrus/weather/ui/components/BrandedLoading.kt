@@ -1,8 +1,8 @@
 package com.cirrus.weather.ui.components
 
+import androidx.compose.animation.core.EaseInOutSine
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.easeInOutSine
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -36,15 +38,21 @@ import com.cirrus.weather.ui.theme.rememberReducedMotion
 @Composable
 fun BrandedLoading(modifier: Modifier = Modifier) {
     val reducedMotion = rememberReducedMotion()
-    val pulse by rememberInfiniteTransition(label = "loadingPulse").animateFloat(
-        initialValue = 0.75f,
-        targetValue = 1.15f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(900, easing = easeInOutSine),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "pulseScale",
-    )
+    // With reduced motion the infinite transition is never created at all —
+    // a static mark invalidates nothing instead of ticking at 60 fps.
+    val pulse: Float by if (reducedMotion) {
+        remember { mutableStateOf(0.95f) }
+    } else {
+        rememberInfiniteTransition(label = "loadingPulse").animateFloat(
+            initialValue = 0.75f,
+            targetValue = 1.15f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(900, easing = EaseInOutSine),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "pulseScale",
+        )
+    }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -60,7 +68,7 @@ fun BrandedLoading(modifier: Modifier = Modifier) {
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             Canvas(modifier = Modifier.size(72.dp)) {
-                val r = size.minDimension / 2f * (if (reducedMotion) 0.95f else pulse)
+                val r = size.minDimension / 2f * pulse
                 // Soft glow, then core.
                 drawCircle(Color(0xFFFFC94D).copy(alpha = 0.22f), radius = r * 1.35f)
                 drawCircle(Color(0xFFFFC94D), radius = r * 0.62f)

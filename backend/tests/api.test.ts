@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -17,7 +17,7 @@ afterAll(() => rmSync(tmpDataDir, { recursive: true, force: true }))
 process.env.WEATHER_API_KEY = 'test-key'
 process.env.LOG_LEVEL = 'silent'
 resetConfigCache()
-const config = loadConfig({ ...process.env, WEATHER_API_KEY: 'test-key', DATA_DIR: tmpDataDir, DEVICE_WRITE_RATE_LIMIT_MAX: '100' })
+const config = loadConfig({ ...process.env, WEATHER_API_KEY: 'test-key', DATA_DIR: tmpDataDir, DEVICE_WRITE_RATE_LIMIT_MAX: '100', CACHE_TTL_MS: '60000' })
 
 const fixtureBundle = {
   currentConditions: {
@@ -69,6 +69,7 @@ const services: Services = {
       sharedGeocodeSearches.push({ name, count })
       return { results: [] }
     },
+    reverse: async () => ({ name: 'Somewhere', admin1: '', country: '' }),
   } as unknown as GeocodingClient,
   coreCache: new TtlCache(60_000),
   alertsCache: new TtlCache(15_000),
@@ -232,8 +233,18 @@ describe('GET /api/v1/weather/bundle', () => {
 
   it('bounds a degraded bundle to the short TTL — a blip never freezes for 10 minutes', async () => {
     let calls = 0
+    resetConfigCache()
+    const shortTtlConfig = loadConfig({
+      ...process.env,
+      WEATHER_API_KEY: 'test-key',
+      DATA_DIR: tmpDataDir,
+      DEGRADED_CACHE_TTL_MS: '50',
+      CACHE_TTL_MS: '60000',
+      DEVICE_RATE_LIMIT_MAX: '100',
+    } as NodeJS.ProcessEnv)
     const flaky: Services = {
       ...services,
+      config: shortTtlConfig,
       coreCache: new TtlCache(60_000),
       alertsCache: new TtlCache(15_000),
       weather: {
@@ -246,14 +257,6 @@ describe('GET /api/v1/weather/bundle', () => {
         publicAlerts: async () => ({}),
       } as unknown as GoogleWeatherClient,
     }
-    resetConfigCache()
-    const shortTtlConfig = loadConfig({
-      ...process.env,
-      WEATHER_API_KEY: 'test-key',
-      DATA_DIR: tmpDataDir,
-      DEGRADED_CACHE_TTL_MS: '50',
-      DEVICE_RATE_LIMIT_MAX: '100',
-    } as NodeJS.ProcessEnv)
     const degradedApp = createApp(shortTtlConfig, flaky)
 
     const first = await request(degradedApp).get('/api/v1/weather/bundle?lat=7&lon=7')
@@ -271,7 +274,7 @@ describe('GET /api/v1/weather/bundle', () => {
     await new Promise((r) => setTimeout(r, 80))
     const third = await request(degradedApp).get('/api/v1/weather/bundle?lat=7&lon=7')
     expect(third.headers['x-cache']).toBe('miss')
-    expect(third.body.degraded).toBeUndefined()
+    expect(third.body.degraded).toBe(false)
     expect(calls).toBe(2)
   })
 
@@ -501,14 +504,53 @@ describe('readiness / graceful drain', () => {
 })
 
 describe('response compression', () => {
+  // >1 KB so the compression threshold actually engages.
+  const bigBundle = { ...fixtureBundle, padding: 'x'.repeat(8192) }
+  const gzipServices: Services = {
+    ...services,
+    weather: {
+      coreBundle: async () => bigBundle,
+      currentConditions: async () => fixtureBundle.currentConditions,
+      publicAlerts: async () => ({}),
+    } as unknown as GoogleWeatherClient,
+  }
+  const gzipApp = createApp(config, gzipServices)
+
   it('gzips large JSON responses for clients that accept it', async () => {
-    const res = await request(app)
-      .get('/api/v1/weather/bundle?lat=17.38&lon=78.48')
+    const res = await request(gzipApp)
+      .get('/api/v1/weather/bundle?lat=41.38&lon=2.17')
       .set('Accept-Encoding', 'gzip')
     expect(res.status).toBe(200)
     expect(res.headers['content-encoding']).toBe('gzip')
+    // The compressed path must still declare its media type — strict JSON
+    // clients refuse untyped bodies (this is exactly the bug the commit's
+    // first version shipped).
+    expect(res.headers['content-type']).toContain('application/json')
+    expect(res.headers.vary).toContain('Accept-Encoding')
     // supertest decompresses transparently — the payload must still parse.
     expect(res.body.currentConditions.weatherCondition.type).toBe('CLEAR')
+  })
+
+  it('honors an explicit gzip;q=0 refusal (RFC 9110 negotiation)', async () => {
+    const res = await request(gzipApp)
+      .get('/api/v1/weather/bundle?lat=41.38&lon=2.17')
+      .set('Accept-Encoding', 'gzip;q=0')
+    expect(res.status).toBe(200)
+    expect(res.headers['content-encoding']).toBeUndefined()
+  })
+
+  it('accepts gzip via the * wildcard token', async () => {
+    const res = await request(gzipApp)
+      .get('/api/v1/weather/bundle?lat=41.38&lon=2.17')
+      .set('Accept-Encoding', '*')
+    expect(res.headers['content-encoding']).toBe('gzip')
+  })
+
+  it('sets Vary: Accept-Encoding even on the identity path', async () => {
+    const res = await request(gzipApp)
+      .get('/api/v1/weather/bundle?lat=41.38&lon=2.17')
+      .set('Accept-Encoding', 'identity')
+    expect(res.headers.vary).toContain('Accept-Encoding')
   })
 
   it('leaves small responses and non-gzip clients untouched', async () => {
@@ -832,5 +874,560 @@ describe('unknown routes', () => {
     const res = await request(app).get('/api/v1/nope')
     expect(res.status).toBe(404)
     expect(res.body.error).toBe('not_found')
+  })
+})
+
+describe('resolvePack — Chinese script/region handling', () => {
+  // Behind the /languages + device-language path: the primary-subtag scan
+  // alone would hand every zh* locale Simplified Chinese by pack order.
+  it('maps Traditional-script and HK/MO/TW locales to zh-TW', async () => {
+    const { resolvePack } = await import('../src/i18n/index.js')
+    for (const code of ['zh-HK', 'zh-Hant', 'zh-Hant-TW', 'zh-TW', 'zh_MO', 'zh_tw', 'zh-Latn-TW', 'zh-419-HK']) {
+      expect(resolvePack(code).code).toBe('zh-TW')
+    }
+    expect(resolvePack('zh').code).toBe('zh-CN')
+    expect(resolvePack('zh-SG').code).toBe('zh-CN')
+  })
+})
+
+describe('acceptsGzip negotiation (RFC 9110)', () => {
+  it('decides every token/q-value combination correctly', async () => {
+    const { acceptsGzip } = await import('../src/compression.js')
+    expect(acceptsGzip('gzip')).toBe(true)
+    expect(acceptsGzip('GZIP')).toBe(true)
+    expect(acceptsGzip('x-gzip')).toBe(true)
+    expect(acceptsGzip('deflate, gzip;q=1.0')).toBe(true)
+    expect(acceptsGzip('gzip;q=0.5, br')).toBe(true)
+    expect(acceptsGzip('*')).toBe(true)
+    expect(acceptsGzip('*;q=0.3')).toBe(true)
+    expect(acceptsGzip('*;q=0')).toBe(false) // wildcard refusal
+    expect(acceptsGzip('gzip;q=1.0, gzip;q=0')).toBe(true) // most permissive token wins
+    expect(acceptsGzip('gzip;q=0')).toBe(false) // explicit refusal
+    expect(acceptsGzip('gzip;q=0.0')).toBe(false)
+    expect(acceptsGzip('*, gzip;q=0')).toBe(false) // explicit beats wildcard
+    expect(acceptsGzip('gzip;q=abc')).toBe(false) // unusable q → 0
+    expect(acceptsGzip('br, deflate')).toBe(false)
+    expect(acceptsGzip('')).toBe(false)
+    expect(acceptsGzip('gzip,')).toBe(true) // empty trailing token
+    expect(acceptsGzip('gzip;v=1')).toBe(true) // non-q directives ignored
+    expect(acceptsGzip('gzip;q')).toBe(false) // malformed q directive = refusal
+  })
+})
+
+describe('guarded device writes reject when the hash moved on', () => {
+  // The middleware verified the secret, but a concurrent rotation changed
+  // the record before the write: both guarded routes must answer 401
+  // instead of silently clobbering the newer state.
+  it('re-registration and rotation both fail closed', async () => {
+    const guardedDevices = Object.assign(Object.create(Object.getPrototypeOf(services.devices)), services.devices, {
+      updateIfSecretMatches: async () => null,
+    })
+    const guardedApp = createApp(config, { ...services, devices: guardedDevices })
+
+    // Register a device through the real store, capture its secret.
+    const reg = await request(app)
+      .post('/api/v1/devices')
+      .send(deviceBody())
+    expect(reg.status).toBe(201)
+    const secret: string = reg.body.deviceSecret
+
+    // Re-registration (update path) → guard rejects → 401.
+    const update = await request(guardedApp)
+      .post('/api/v1/devices')
+      .set('X-Device-Secret', secret)
+      .send(deviceBody())
+    expect(update.status).toBe(401)
+
+    // Rotation → guard rejects → 401, and no secret is handed out.
+    const rotate = await request(guardedApp)
+      .post(`/api/v1/devices/${reg.body.deviceId}/secret`)
+      .set('X-Device-Secret', secret)
+    expect(rotate.status).toBe(401)
+    expect(rotate.body.deviceSecret).toBeUndefined()
+  })
+})
+
+function deviceBody() {
+  return {
+    deviceId: 'guard-race-0001',
+    language: 'en',
+    city: { id: 'c', name: 'T', latitude: 1, longitude: 2 },
+    notificationTime: { hour: 8, minute: 0 },
+    units: 'metric',
+    alertsEnabled: true,
+  }
+}
+
+describe('alerts fail soft inside the bundle', () => {
+  it('a failing alerts endpoint degrades the bundle but still serves the core', async () => {
+    const alertsDown: Services = {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async () => fixtureBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => {
+          throw new Error('alerts endpoint down')
+        },
+      } as unknown as GoogleWeatherClient,
+    }
+    const app2 = createApp(config, alertsDown)
+    const res = await request(app2).get('/api/v1/weather/bundle?lat=12.34&lon=56.78')
+    expect(res.status).toBe(200)
+    expect(res.body.degraded).toBe(true)
+    expect(res.body.currentConditions.weatherCondition.type).toBe('CLEAR')
+  })
+})
+
+describe('client disconnects abort the upstream fan-out', () => {
+  it('a hung-up client cancels the in-flight upstream load', async () => {
+    const http = await import('node:http')
+    let observed: AbortSignal | undefined
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const slow: Services = {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async (_c: unknown, signal?: AbortSignal) => {
+          observed = signal
+          await gate
+          return fixtureBundle
+        },
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => ({}),
+      } as unknown as GoogleWeatherClient,
+    }
+    const server = http.createServer(createApp(config, slow))
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as { port: number }).port
+
+    // A dedicated, non-keep-alive agent: destroying this socket must never
+    // disturb the process-global agent that supertest shares with the other
+    // concurrently running test files.
+    const agent = new http.Agent({ keepAlive: false })
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/api/v1/weather/bundle?lat=44.44&lon=55.55',
+        agent,
+      },
+      () => {},
+    )
+    req.on('error', () => {}) // the destroy below surfaces as ECONNRESET here
+    req.end()
+    // Wait until the upstream loader holds the request-scoped signal, then
+    // hang up the socket out from under it.
+    await vi.waitFor(() => {
+      if (observed === undefined) throw new Error('upstream not reached yet')
+    })
+    req.destroy()
+    await vi.waitFor(() => {
+      if (!observed!.aborted) throw new Error('scope not aborted yet')
+    })
+    release!()
+    await new Promise<void>((r) => server.close(() => r()))
+  }, 10_000)
+})
+
+describe('compression threshold boundary', () => {
+  it('compresses exactly at THRESHOLD_BYTES and not one byte below', async () => {
+    const express = (await import('express')).default
+    const { gzipJsonMiddleware } = await import('../src/compression.js')
+    const bodyAt = (n: number) => {
+      // {"padding":"…"} — tune the pad so the serialized JSON is exactly n bytes.
+      const overhead = JSON.stringify({ padding: '' }).length - 2 // quotes of ''
+      return { padding: 'X'.repeat(n - overhead - JSON.stringify({ padding: '' }).length + 0) }
+    }
+    const sizedBody = (n: number): Record<string, string> => {
+      const base = JSON.stringify({ padding: '' }).length // length with empty pad
+      return { padding: 'X'.repeat(n - base) }
+    }
+    const appFor = (n: number) => {
+      const app = express()
+      app.use(gzipJsonMiddleware)
+      app.get('/x', (_req, res) => res.json(sizedBody(n)))
+      return app
+    }
+    expect(Buffer.byteLength(JSON.stringify(sizedBody(1024)))).toBe(1024)
+    expect(Buffer.byteLength(JSON.stringify(sizedBody(1023)))).toBe(1023)
+
+    const at = await request(appFor(1024)).get('/x').set('Accept-Encoding', 'gzip')
+    expect(at.headers['content-encoding']).toBe('gzip')
+    const below = await request(appFor(1023)).get('/x').set('Accept-Encoding', 'gzip')
+    expect(below.headers['content-encoding']).toBeUndefined()
+  })
+
+  it('parses tokens and directives with generous whitespace', async () => {
+    const { acceptsGzip } = await import('../src/compression.js')
+    expect(acceptsGzip('  gzip  ')).toBe(true)
+    expect(acceptsGzip('gzip ; q=0.5 , br')).toBe(true)
+    expect(acceptsGzip('GZip;Q=0')).toBe(false)
+  })
+})
+
+describe('exact cacheability header values', () => {
+  it('static routes advertise their exact TTLs and ages', async () => {
+    const langs = await request(app).get('/api/v1/languages')
+    expect(langs.headers['cache-control']).toBe('public, max-age=86400')
+
+    const bundle = await request(app).get('/api/v1/weather/bundle?lat=60.60&lon=60.60')
+    expect(bundle.headers['x-alerts-age-seconds']).toBe('0')
+    expect(bundle.headers['x-data-age-seconds']).toBe('0')
+
+    const geo = await request(app).get('/api/v1/geocode?name=Hyderabad')
+    expect(geo.headers['cache-control']).toBe('public, max-age=300')
+
+    const rev = await request(app).get('/api/v1/geocode/reverse?lat=17.38&lon=78.48')
+    expect(rev.headers['cache-control']).toBe('public, max-age=300')
+
+    const alerts = await request(app).get('/api/v1/notifications/alerts?lat=61.61&lon=61.61')
+    expect(alerts.headers['cache-control']).toBe('no-store')
+    expect(alerts.headers['x-data-age-seconds']).toBe('0')
+
+    const missing = await request(app).get('/api/v1/nope')
+    expect(missing.headers['cache-control']).toBe('no-store')
+  })
+
+  it('secret rotation responses are no-store', async () => {
+    const body = { ...deviceBody(), deviceId: 'rot-store-00001' }
+    const reg = await request(app).post('/api/v1/devices').send(body)
+    const secret = reg.body.deviceSecret as string
+    const rotate = await request(app)
+      .post(`/api/v1/devices/${reg.body.deviceId}/secret`)
+      .set('X-Device-Secret', secret)
+    expect(rotate.status).toBe(200)
+    expect(rotate.headers['cache-control']).toBe('no-store')
+  })
+})
+
+describe('acceptsGzip q-clamping', () => {
+  it('clamps out-of-range q values to the valid range', async () => {
+    const { acceptsGzip } = await import('../src/compression.js')
+    expect(acceptsGzip('gzip;q=1.5')).toBe(true) // clamped to 1
+    expect(acceptsGzip('gzip;q=-1')).toBe(false) // clamped to 0
+    expect(acceptsGzip('gzip ; q=0')).toBe(false) // untrimmed directive must still parse
+    expect(acceptsGzip('gzip;q =0')).toBe(false) // untrimmed KEY must still parse
+    expect(acceptsGzip('gzip;level=0')).toBe(true) // non-q directives ignored
+    expect(acceptsGzip('deflate ; x=1, gzip ; q=1')).toBe(true)
+  })
+})
+
+describe('degraded plumbing at the route boundary', () => {
+  it('a briefing built on an alerts-missing bundle makes no rain claim', async () => {
+    // Low precip everywhere: a healthy bundle would say "No rain expected
+    // today" — the degraded (alerts-missing) flag must suppress that claim.
+    const dryBundle = {
+      ...fixtureBundle,
+      forecastHours: {
+        forecastHours: fixtureBundle.forecastHours.forecastHours.map((h: { precipitation?: { probability?: { percent?: number } } }) => ({
+          ...h,
+          precipitation: { probability: { percent: 5 } },
+        })),
+      },
+    }
+    const alertsDown: Services = {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async () => dryBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => {
+          throw new Error('alerts endpoint down')
+        },
+      } as unknown as GoogleWeatherClient,
+    }
+    const app3 = createApp(config, alertsDown)
+    const res = await request(app3).get(
+      '/api/v1/notifications/briefing?lat=13.13&lon=13.13&city=T',
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.body).not.toContain('No rain expected today')
+    // The same dry bundle WITH alerts does claim it — proving the route's
+    // degraded plumbing (not the generator alone) is the pivot.
+    const healthyApp = createApp(config, {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async () => dryBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => ({}),
+      } as unknown as GoogleWeatherClient,
+    })
+    const healthy = await request(healthyApp).get(
+      '/api/v1/notifications/briefing?lat=13.13&lon=13.13&city=T',
+    )
+    expect(healthy.body.body).toContain('No rain expected today')
+  })
+
+  it('an alerts-missing bundle clamps its advertised max-age to the short window', async () => {
+    const alertsDown: Services = {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async () => fixtureBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => {
+          throw new Error('down')
+        },
+      } as unknown as GoogleWeatherClient,
+    }
+    const app4 = createApp(config, alertsDown)
+    const res = await request(app4).get('/api/v1/weather/bundle?lat=14.14&lon=14.14')
+    const maxAge = Number(res.headers['cache-control'].match(/max-age=(\d+)/)?.[1])
+    expect(maxAge).toBeLessThanOrEqual(30)
+  })
+})
+
+describe('cache-key namespaces and aged headers', () => {
+  it('reverse geocode results are keyed apart from search results', async () => {
+    // Same coordinate cell, same underlying cache instance: a search for
+    // "rev-ish" text and a reverse lookup must never share an entry.
+    const geoCalls: string[] = []
+    const geo: Services = {
+      ...services,
+      geocodeCache: new TtlCache(60_000),
+      geocoding: {
+        search: async (name: string) => {
+          geoCalls.push(`search:${name}`)
+          return { results: [{ id: 1, name, latitude: 1, longitude: 2 }] }
+        },
+        reverse: async () => {
+          geoCalls.push('reverse')
+          return { name: 'Reverseville', admin1: '', country: '' }
+        },
+      } as unknown as GeocodingClient,
+    }
+    const geoApp = createApp(config, geo)
+    const rev = await request(geoApp).get('/api/v1/geocode/reverse?lat=1.00&lon=2.00')
+    expect(rev.body.name).toBe('Reverseville') // a search entry would echo `name` of the query
+    const search = await request(geoApp).get('/api/v1/geocode?name=rev%7C1.00,2.00')
+    expect(search.body.results[0].name).toBe('rev|1.00,2.00')
+    expect(geoCalls).toEqual(['reverse', 'search:rev|1.00,2.00']) // two upstream calls, no cross-hit
+  })
+
+  it('aged hits advertise a nonzero data age and a reduced max-age', async () => {
+    const aged: Services = {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async () => fixtureBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => ({}),
+      } as unknown as GoogleWeatherClient,
+    }
+    const agedApp2 = createApp(config, aged)
+    await request(agedApp2).get('/api/v1/weather/bundle?lat=15.15&lon=15.15')
+    await new Promise((r) => setTimeout(r, 1_100))
+    const hit = await request(agedApp2).get('/api/v1/weather/bundle?lat=15.15&lon=15.15')
+    expect(hit.headers['x-cache']).toBe('hit')
+    expect(Number(hit.headers['x-data-age-seconds'])).toBeGreaterThanOrEqual(1)
+    const maxAge = Number(hit.headers['cache-control'].match(/max-age=(\d+)/)?.[1])
+    expect(maxAge).toBeLessThan(60)
+  })
+})
+
+describe('survivor-kill batch (mutation triage)', () => {
+  it('a degraded briefing also clamps its private max-age', async () => {
+    const alertsDown: Services = {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async () => fixtureBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => {
+          throw new Error('down')
+        },
+      } as unknown as GoogleWeatherClient,
+    }
+    const app5 = createApp(config, alertsDown)
+    const res = await request(app5).get('/api/v1/notifications/briefing?lat=16.16&lon=16.16&city=T')
+    expect(res.status).toBe(200)
+    const maxAge = Number(res.headers['cache-control'].match(/max-age=(\d+)/)?.[1])
+    expect(maxAge).toBeLessThanOrEqual(30)
+  })
+
+  it('the alerts-failed bundle omits the alerts age header entirely', async () => {
+    const alertsDown: Services = {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async () => fixtureBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => {
+          throw new Error('down')
+        },
+      } as unknown as GoogleWeatherClient,
+    }
+    const app6 = createApp(config, alertsDown)
+    const res = await request(app6).get('/api/v1/weather/bundle?lat=17.17&lon=17.17')
+    expect(res.body.degraded).toBe(true)
+    expect(res.headers['x-alerts-age-seconds']).toBeUndefined()
+  })
+
+  it('distinct reverse-geocode coordinates never share a cache entry', async () => {
+    const revCalls: number[] = []
+    const geo: Services = {
+      ...services,
+      geocodeCache: new TtlCache(60_000),
+      geocoding: {
+        search: async () => ({ results: [] }),
+        reverse: async (lat: number) => {
+          revCalls.push(lat)
+          return { name: `P${lat}`, admin1: '', country: '' }
+        },
+      } as unknown as GeocodingClient,
+    }
+    const app7 = createApp(config, geo)
+    const a = await request(app7).get('/api/v1/geocode/reverse?lat=10.10&lon=1.00')
+    const b = await request(app7).get('/api/v1/geocode/reverse?lat=20.20&lon=2.00')
+    expect(a.body.name).toBe('P10.1')
+    expect(b.body.name).toBe('P20.2')
+    expect(revCalls).toEqual([10.1, 20.2]) // a shared '' key would collapse these to one call
+  })
+
+  it('the alerts route advertises a nonzero age on an aged hit', async () => {
+    const alertApp = createApp(config, {
+      ...services,
+      alertsCache: new TtlCache(60_000),
+      coreCache: new TtlCache(60_000),
+      weather: {
+        coreBundle: async () => fixtureBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => ({ weatherAlerts: [] }),
+      } as unknown as GoogleWeatherClient,
+    })
+    await request(alertApp).get('/api/v1/notifications/alerts?lat=18.18&lon=18.18')
+    await new Promise((r) => setTimeout(r, 1_100))
+    const hit = await request(alertApp).get('/api/v1/notifications/alerts?lat=18.18&lon=18.18')
+    expect(hit.headers['x-cache']).toBe('hit')
+    const age = Number(hit.headers['x-data-age-seconds'])
+    expect(age).toBeGreaterThanOrEqual(1)
+    expect(age).toBeLessThan(10)
+  })
+
+  it('device registration normalizes the stored language code', async () => {
+    const reg = await request(app)
+      .post('/api/v1/devices')
+      .send({ ...deviceBody(), deviceId: 'lang-norm-0001', language: 'EN-us' })
+    expect(reg.status).toBe(201)
+    const secret = reg.body.deviceSecret as string
+    const me = await request(app)
+      .get(`/api/v1/devices/lang-norm-0001`)
+      .set('X-Device-Secret', secret)
+    expect(me.body.language).toBe('en')
+  })
+
+  it('identity responses quote the exact 401 copy', async () => {
+    const missing = await request(app).get('/api/v1/devices/nobody-12345678')
+    expect(missing.status).toBe(401)
+    expect(missing.body.message).toBe('Missing or invalid device secret.')
+  })
+
+  it('a request with no Accept-Encoding header at all is served identity', async () => {
+    const res = await request(app)
+      .get('/api/v1/weather/bundle?lat=19.19&lon=19.19')
+      // supertest sends no Accept-Encoding by default unless set.
+      .unset('Accept-Encoding')
+    expect(res.status).toBe(200)
+    expect(res.body.currentConditions.weatherCondition.type).toBe('CLEAR')
+  })
+
+  it('the compressed path carries no ETag', async () => {
+    const bigBundle = { ...fixtureBundle, padding: 'y'.repeat(4096) }
+    const etagApp = createApp(config, {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      weather: {
+        coreBundle: async () => bigBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => ({}),
+      } as unknown as GoogleWeatherClient,
+    })
+    const res = await request(etagApp)
+      .get('/api/v1/weather/bundle?lat=43.43&lon=4.44')
+      .set('Accept-Encoding', 'gzip')
+    expect(res.headers['content-encoding']).toBe('gzip')
+    expect(res.headers.etag).toBeUndefined()
+  })
+
+  it('most permissive duplicate token wins (max, not first)', async () => {
+    const { acceptsGzip } = await import('../src/compression.js')
+    expect(acceptsGzip('gzip;q=0, gzip;q=1')).toBe(true)
+  })
+})
+
+describe('healthy briefing plumbing', () => {
+  it('a fully healthy core produces the rain line through the route', async () => {
+    const res = await request(app).get(
+      '/api/v1/notifications/briefing?lat=20.20&lon=20.20&city=Healthy',
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.body).toContain('Rain likely')
+  })
+
+  it('an aged bundle hit advertises a nonzero alerts age too', async () => {
+    const aged: Services = {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async () => fixtureBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => ({}),
+      } as unknown as GoogleWeatherClient,
+    }
+    const agedApp3 = createApp(config, aged)
+    await request(agedApp3).get('/api/v1/weather/bundle?lat=21.21&lon=21.21')
+    await new Promise((r) => setTimeout(r, 1_100))
+    const hit = await request(agedApp3).get('/api/v1/weather/bundle?lat=21.21&lon=21.21')
+    expect(hit.headers['x-cache']).toBe('hit')
+    // Exact-ish: a ÷1000→×1000 mutant yields 1100, far outside the window.
+    const alertsAge = Number(hit.headers['x-alerts-age-seconds'])
+    const dataAge = Number(hit.headers['x-data-age-seconds'])
+    expect(alertsAge).toBeGreaterThanOrEqual(1)
+    expect(alertsAge).toBeLessThan(10)
+    expect(dataAge).toBeGreaterThanOrEqual(1)
+    expect(dataAge).toBeLessThan(10)
+  })
+})
+
+describe('core-degraded briefing plumbing', () => {
+  it('a CORE-degraded dry bundle also stays silent on rain', async () => {
+    const dryBundle = {
+      ...fixtureBundle,
+      degraded: true,
+      forecastHours: {
+        forecastHours: fixtureBundle.forecastHours.forecastHours.map((h: { precipitation?: { probability?: { percent?: number } } }) => ({
+          ...h,
+          precipitation: { probability: { percent: 5 } },
+        })),
+      },
+    }
+    const coreDown: Services = {
+      ...services,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      weather: {
+        coreBundle: async () => dryBundle,
+        currentConditions: async () => fixtureBundle.currentConditions,
+        publicAlerts: async () => ({}),
+      } as unknown as GoogleWeatherClient,
+    }
+    const app8 = createApp(config, coreDown)
+    const res = await request(app8).get('/api/v1/notifications/briefing?lat=22.22&lon=22.22&city=T')
+    expect(res.status).toBe(200)
+    expect(res.body.body).not.toContain('No rain expected today')
   })
 })

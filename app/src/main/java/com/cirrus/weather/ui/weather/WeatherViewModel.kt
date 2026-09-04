@@ -17,9 +17,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.roundToInt
 
 /** How often the view model silently re-fetches the bundle. */
 private const val REFRESH_INTERVAL_MS = 10 * 60 * 1000L
+
+/** Safety floor for the silent-refresh loop — never spin without suspending. */
+private const val SPIN_GUARD_INTERVAL_MS = 60_000L
 
 sealed interface WeatherUiState {
     data object Loading : WeatherUiState
@@ -38,6 +42,14 @@ sealed interface WeatherUiState {
      */
     data class Error(val messageRes: Int) : WeatherUiState
 }
+
+/**
+ * Cache/ownership key for one city snapshot: id plus rounded coordinates, so
+ * the moving device city ("device", new pin) never hydrates or keeps the
+ * previous pin's numbers, while fixed cities keep a stable key.
+ */
+fun SavedCity.weatherCacheKey(): String =
+    "$id@${(latitude * 1000).roundToInt()},${(longitude * 1000).roundToInt()}"
 
 /**
  * Owns the weather bundle for whichever city is active. One instance lives
@@ -63,6 +75,13 @@ class WeatherViewModel(
     /** True while the host is at least STARTED — pauses background polling. */
     private var screenVisible = true
 
+    /** Cache key of the city the on-screen bundle actually belongs to. */
+    private var contentKey: String? = null
+
+    /** Wall-clock deadline of the next silent refresh — survives visibility flaps. */
+    @Volatile
+    private var nextSilentRefreshAt: Long = 0L
+
     /**
      * Points the screen at [city]. A no-op when the same coordinates are
      * already showing: identity is the place on the map, not the row id, so
@@ -78,53 +97,74 @@ class WeatherViewModel(
             return
         }
         val firstLoad = current == null
+        val key = city.weatherCacheKey()
         activeCity.set(city)
         // Cancel whatever the previous city had in flight (load + its
-        // auto-refresh loop) before starting fresh — nothing of the old city
+        // auto-refresh cycle) before starting fresh — nothing of the old city
         // keeps running in the background.
         loadJob?.cancel()
-        autoRefreshJob?.cancel()
         // Keep the previous city's content on screen while the new one loads
         // (the refresh pill signals the swap) — only the very first city
-        // shows the branded loading screen.
+        // shows the branded loading screen. The ownership key below is what
+        // keeps a *failed* swap from leaving city A's numbers under city B's
+        // name: [fallback] refuses to flag foreign content as merely stale.
         if (firstLoad || _state.value !is WeatherUiState.Ready) {
             _state.value = WeatherUiState.Loading
             // Hydrate the last-known bundle for this city immediately: an
             // offline launch shows this morning's numbers flagged stale
             // instead of a dead error screen.
             viewModelScope.launch {
-                val cached = repository.cachedBundle(city.id)
+                val cached = repository.cachedBundle(key)
                 if (cached != null && activeCity.get()?.id == city.id &&
                     _state.value is WeatherUiState.Loading
                 ) {
+                    contentKey = key
                     _state.value = WeatherUiState.Ready(cached, stale = true)
                 }
             }
         }
         refresh()
-        startAutoRefreshLoop()
+        ensureAutoRefreshLoop()
     }
 
-    private fun startAutoRefreshLoop() {
-        autoRefreshJob?.cancel()
+    /**
+     * A single deadline-driven loop per view model: going invisible does not
+     * restart the countdown (the deadline keeps ticking), and flapping
+     * visibility cannot postpone the silent refresh indefinitely. The
+     * deadline itself is owned by [refresh] — every completed attempt, fresh
+     * or silent, schedules the next one a full interval out.
+     */
+    private fun ensureAutoRefreshLoop() {
+        if (autoRefreshJob?.isActive == true) return
         autoRefreshJob = viewModelScope.launch {
             while (isActive) {
-                delay(REFRESH_INTERVAL_MS)
-                // Poll only while the user can see the screen: a backgrounded
-                // task must not silently re-fetch every 10 minutes.
-                if (screenVisible) refresh(silent = true)
+                val wait = nextSilentRefreshAt - System.currentTimeMillis()
+                if (wait > 0) delay(wait)
+                if (!isActive) break
+                if (System.currentTimeMillis() < nextSilentRefreshAt) continue
+                if (screenVisible) {
+                    refresh(silent = true) // resets the deadline itself
+                } else {
+                    nextSilentRefreshAt = System.currentTimeMillis() + REFRESH_INTERVAL_MS
+                }
+                // Spin guard: if the deadline is somehow still in the past
+                // (e.g. refresh skipped on an in-flight load without moving
+                // it), re-arm a minute out instead of looping without any
+                // suspension point.
+                if (nextSilentRefreshAt <= System.currentTimeMillis()) {
+                    nextSilentRefreshAt = System.currentTimeMillis() + SPIN_GUARD_INTERVAL_MS
+                }
             }
         }
     }
 
     /**
      * Called by the host on lifecycle START/STOP: background polling pauses
-     * with the screen and resumes where it left off.
+     * with the screen and resumes on the same schedule.
      */
     fun setScreenVisible(visible: Boolean) {
         if (screenVisible == visible) return
         screenVisible = visible
-        if (visible) startAutoRefreshLoop()
     }
 
     /**
@@ -136,6 +176,10 @@ class WeatherViewModel(
         val city = activeCity.get() ?: return
         if (silent && loadJob?.isActive == true) return
         loadJob?.cancel()
+        // Every attempt owns the schedule: the next silent fetch is a full
+        // interval after this one, fresh or not.
+        nextSilentRefreshAt = System.currentTimeMillis() + REFRESH_INTERVAL_MS
+        val key = city.weatherCacheKey()
         loadJob = viewModelScope.launch {
             if (!silent) _refreshing.value = true
             val job = coroutineContext[Job]
@@ -143,24 +187,25 @@ class WeatherViewModel(
                 val bundle = repository.loadBundle(
                     city.latitude,
                     city.longitude,
-                    cacheKey = city.id,
+                    cacheKey = key,
                     languageCode = languageCode(),
                 )
                 // A cancelled predecessor must not clobber a newer city's data.
                 if (activeCity.get()?.id == city.id) {
+                    contentKey = key
                     _state.value = WeatherUiState.Ready(bundle)
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: IOException) {
                 if (activeCity.get()?.id == city.id) {
-                    _state.value = fallback(R.string.error_offline)
+                    _state.value = fallback(key, R.string.error_offline)
                 }
             } catch (_: Exception) {
                 // No raw exception text on the error screen — users get the
                 // plain-language copy; the exception belongs in logs.
                 if (activeCity.get()?.id == city.id) {
-                    _state.value = fallback(R.string.error_generic)
+                    _state.value = fallback(key, R.string.error_generic)
                 }
             } finally {
                 // Only the request that still owns the spinner may clear it —
@@ -172,10 +217,22 @@ class WeatherViewModel(
 
     /** Keep the last good bundle on refresh failures — flagged stale so the
      *  UI can say so — and only surface a full error screen when there is
-     *  nothing to show. */
-    private fun fallback(messageRes: Int): WeatherUiState =
-        (_state.value as? WeatherUiState.Ready)?.copy(stale = true)
-            ?: WeatherUiState.Error(messageRes)
+     *  nothing to show. Content that belongs to a *different* city is never
+     *  passed off as "the last forecast" for the city now on screen: the new
+     *  city's own last-known bundle is used, or the error screen. */
+    private suspend fun fallback(key: String, messageRes: Int): WeatherUiState {
+        if (contentKey == key) {
+            return (_state.value as? WeatherUiState.Ready)?.copy(stale = true)
+                ?: WeatherUiState.Error(messageRes)
+        }
+        val cached = repository.cachedBundle(key)
+        if (cached != null) {
+            contentKey = key
+            return WeatherUiState.Ready(cached, stale = true)
+        }
+        contentKey = null
+        return WeatherUiState.Error(messageRes)
+    }
 
     class Factory(
         private val repository: WeatherRepository,

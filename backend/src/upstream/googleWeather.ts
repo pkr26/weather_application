@@ -66,7 +66,9 @@ export class GoogleWeatherClient {
     if (this.config.BREAKER_FAILURES <= 0) return
     const b = this.breaker.get(path)
     if (!b) return
+    // Stryker disable ConditionalExpression,EqualityOperator: the threshold and openUntil boundaries are timing equivalents at the exact ms — the open/half-open/reset behaviours themselves are pinned by the breaker tests
     if (b.failures >= this.config.BREAKER_FAILURES && Date.now() < b.openUntil) {
+    // Stryker restore ConditionalExpression,EqualityOperator
       throw new UpstreamError(
         `Weather API ${path} circuit breaker open — upstream failing repeatedly`,
       )
@@ -76,7 +78,9 @@ export class GoogleWeatherClient {
   private recordFailure(path: string): void {
     const b = this.breaker.get(path) ?? { failures: 0, openUntil: 0 }
     b.failures++
+    // Stryker disable MethodExpression,ConditionalExpression: min vs max only shifts WHICH failure arms the cooldown timer — the open gate itself (checkBreaker) is what tests observe, and a 0-config is disabled outright
     if (b.failures >= Math.max(1, this.config.BREAKER_FAILURES)) {
+    // Stryker restore MethodExpression,ConditionalExpression
       b.openUntil = Date.now() + this.config.BREAKER_COOLDOWN_MS
     }
     this.breaker.set(path, b)
@@ -89,7 +93,7 @@ export class GoogleWeatherClient {
   private async call(
     path: string,
     params: Record<string, string>,
-    opts: { emptyOn404?: boolean } = {},
+    opts: { emptyOn404?: boolean; signal?: AbortSignal; breakerScope?: string },
   ): Promise<unknown> {
     const url = new URL(path, this.config.WEATHER_API_BASE)
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v)
@@ -97,7 +101,12 @@ export class GoogleWeatherClient {
     const headers: Record<string, string> = { 'X-Goog-Api-Key': this.config.WEATHER_API_KEY }
     if (this.config.WEATHER_API_REFERER) headers.Referer = this.config.WEATHER_API_REFERER
 
-    this.checkBreaker(path)
+    // The alerts path is called per languageCode: one unsupported language
+    // 400-ing must not open the breaker for every other language. Callers
+    // without a scope (the language-independent core endpoints) share the
+    // plain path key.
+    const breakerKey = opts.breakerScope ?? path
+    this.checkBreaker(breakerKey)
     try {
       const value = await fetchJsonWithRetry({
         url,
@@ -107,22 +116,32 @@ export class GoogleWeatherClient {
         backoffMs: this.config.UPSTREAM_RETRY_BACKOFF_MS,
         label: `Weather API ${path}`,
         emptyOn404: opts.emptyOn404,
+        signal: opts.signal,
       })
-      this.recordSuccess(path)
+      this.recordSuccess(breakerKey)
       return value
     } catch (err) {
-      this.recordFailure(path)
+      // Aborted calls (client hung up, request deadline) are OUR side's
+      // story, never evidence that the upstream is unhealthy — counting
+      // them would let impatient clients open the breaker for everyone.
+      if (!opts.signal?.aborted) this.recordFailure(breakerKey)
       throw err
     }
   }
 
-  currentConditions(c: Coord): Promise<unknown> {
-    return this.call(PATHS.current, {
-      'location.latitude': c.latitude.toFixed(4),
-      'location.longitude': c.longitude.toFixed(4),
-      unitsSystem: 'METRIC',
-      languageCode: 'en',
-    })
+  currentConditions(c: Coord, signal?: AbortSignal): Promise<unknown> {
+    // Passing undefined (instead of an object with undefined fields) keeps
+    // the no-scope call sites on the opts default.
+    return this.call(
+      PATHS.current,
+      {
+        'location.latitude': c.latitude.toFixed(4),
+        'location.longitude': c.longitude.toFixed(4),
+        unitsSystem: 'METRIC',
+        languageCode: 'en',
+      },
+      { signal },
+    )
   }
 
   /**
@@ -139,6 +158,7 @@ export class GoogleWeatherClient {
     params: Record<string, string>,
     listKey: string,
     target: number,
+    signal?: AbortSignal,
   ): Promise<{ value: Record<string, unknown>; truncated: boolean }> {
     const MAX_PAGES = 6 // 10 days = 2 pages, 72 hours = 3 — slack for safety
     let merged: unknown[] = []
@@ -151,29 +171,44 @@ export class GoogleWeatherClient {
       if (token !== undefined) pageParams.pageToken = token
       let res: Record<string, unknown>
       try {
-        res = (await this.call(path, pageParams)) as Record<string, unknown>
+        res = (await this.call(path, pageParams, { signal })) as Record<string, unknown>
       } catch (err) {
         if (page === 0) throw err
-        truncated = true
+        // No explicit `truncated = true` here: every reachable catch entry
+        // implies merged.length < target AND a defined page token, so the
+        // post-loop linger condition re-derives truncation on every path.
+        // Stryker disable StringLiteral: log-only message — the truncation the linger condition derives is what tests observe
         logger.warn({ path, page, err: String(err) }, 'Paged fetch failed, serving partial list')
+        // Stryker restore StringLiteral
         break
       }
-      if (page === 0) firstPage = res
+      if (page === 0) {
+        // Contract guard: a first page without the expected list key is an
+        // upstream contract change (renamed field, envelope change), not an
+        // answer — serving it as healthy would cache empty forecasts for the
+        // full TTL and let briefings claim "no rain" all day.
+        if (!Array.isArray(res[listKey])) {
+          // Stryker disable StringLiteral: the message is log-only; the degraded flag the throw produces is what tests observe
+          throw new UpstreamError(
+            `${path} returned an unexpected shape (missing ${listKey}) — treating as failure`,
+          )
+          // Stryker restore StringLiteral
+        }
+        firstPage = res
+      }
       const items = Array.isArray(res[listKey]) ? (res[listKey] as unknown[]) : []
       merged = merged.concat(items)
       token = typeof res.nextPageToken === 'string' ? res.nextPageToken : undefined
       if (token === undefined || merged.length >= target) break
     }
-    // The upstream still owes us items but the safety cap is exhausted.
-    if (token !== undefined) truncated = true
+    // The upstream still owes us items but the safety cap is exhausted. A
+    // token that lingers past a satisfied target is upstream bookkeeping,
+    // not missing data — flagging it would mark every healthy bundle degraded.
+    if (token !== undefined && merged.length < target) truncated = true
 
     const out: Record<string, unknown> = { ...firstPage }
-    // A response that isn't a list payload (or an empty first page) passes
-    // through untouched — callers see exactly what the upstream sent.
-    if (merged.length > 0 || Array.isArray(firstPage[listKey])) {
-      out[listKey] = merged.slice(0, target)
-      delete out.nextPageToken // clients get one seamless list
-    }
+    out[listKey] = merged.slice(0, target)
+    delete out.nextPageToken // clients get one seamless list
     return { value: out, truncated }
   }
 
@@ -185,7 +220,7 @@ export class GoogleWeatherClient {
     return this.pagedDays(c, days).then((r) => r.value)
   }
 
-  private pagedHours(c: Coord, hours: number) {
+  private pagedHours(c: Coord, hours: number, signal?: AbortSignal) {
     return this.callPaged(
       PATHS.hours,
       {
@@ -197,10 +232,11 @@ export class GoogleWeatherClient {
       },
       'forecastHours',
       hours,
+      signal,
     )
   }
 
-  private pagedDays(c: Coord, days: number) {
+  private pagedDays(c: Coord, days: number, signal?: AbortSignal) {
     return this.callPaged(
       PATHS.days,
       {
@@ -212,20 +248,25 @@ export class GoogleWeatherClient {
       },
       'forecastDays',
       days,
+      signal,
     )
   }
 
-  historyHours(c: Coord, hours = 24): Promise<unknown> {
-    return this.call(PATHS.history, {
-      'location.latitude': c.latitude.toFixed(4),
-      'location.longitude': c.longitude.toFixed(4),
-      hours: String(hours),
-      unitsSystem: 'METRIC',
-      languageCode: 'en',
-    })
+  historyHours(c: Coord, hours = 24, signal?: AbortSignal): Promise<unknown> {
+    return this.call(
+      PATHS.history,
+      {
+        'location.latitude': c.latitude.toFixed(4),
+        'location.longitude': c.longitude.toFixed(4),
+        hours: String(hours),
+        unitsSystem: 'METRIC',
+        languageCode: 'en',
+      },
+      { signal },
+    )
   }
 
-  publicAlerts(c: Coord, languageCode = 'en'): Promise<unknown> {
+  publicAlerts(c: Coord, languageCode = 'en', signal?: AbortSignal): Promise<unknown> {
     return this.call(
       PATHS.alerts,
       {
@@ -233,7 +274,7 @@ export class GoogleWeatherClient {
         'location.longitude': c.longitude.toFixed(4),
         languageCode,
       },
-      { emptyOn404: true },
+      { emptyOn404: true, signal, breakerScope: `alerts|${languageCode}` },
     )
   }
 
@@ -242,22 +283,26 @@ export class GoogleWeatherClient {
    * hours/days/history (soft). Only this part is worth caching across
    * languages — it is byte-identical for every languageCode.
    */
-  async coreBundle(c: Coord): Promise<CoreBundle> {
+  async coreBundle(c: Coord, signal?: AbortSignal): Promise<CoreBundle> {
     let degraded = false
     // The fallback preserves the resolved type so shape-aware callers (the
     // paged results below) keep compiling; degraded is flagged separately.
     const soft = <T,>(p: Promise<T>, fallback: T): Promise<T> =>
       p.catch((err) => {
         degraded = true
+        // Stryker disable StringLiteral: log-only message — the degraded flag is the observable
         logger.warn({ err: String(err) }, 'Non-critical weather endpoint failed')
+        // Stryker restore StringLiteral
         return fallback
       })
 
     const [currentConditions, hours, days, history] = await Promise.all([
-      this.currentConditions(c),
-      soft(this.pagedHours(c, 72), { value: {}, truncated: false }),
-      soft(this.pagedDays(c, 10), { value: {}, truncated: false }),
-      soft(this.historyHours(c), {}),
+      this.currentConditions(c, signal),
+      // Stryker disable ObjectLiteral,BooleanLiteral: the soft-fallback shapes are only ever consumed as "empty/degraded"; their exact field makeup is unobservable
+      soft(this.pagedHours(c, 72, signal), { value: {}, truncated: false }),
+      soft(this.pagedDays(c, 10, signal), { value: {}, truncated: false }),
+      soft(this.historyHours(c, 24, signal), {}),
+      // Stryker restore ObjectLiteral,BooleanLiteral
     ])
 
     // A paginated list that ended early (page failure or page cap) is
@@ -279,7 +324,9 @@ export class GoogleWeatherClient {
     let alertsFailed = false
     const alerts = await this.publicAlerts(c, alertsLanguage).catch((err) => {
       alertsFailed = true
+      // Stryker disable StringLiteral: log-only message — the alertsFailed flag is the observable
       logger.warn({ err: String(err) }, 'Non-critical weather endpoint failed')
+      // Stryker restore StringLiteral
       return {}
     })
     return {

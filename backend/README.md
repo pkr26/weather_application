@@ -42,7 +42,7 @@ docker build -t cirrus-backend . && docker run -p 8080:8080 -e WEATHER_API_KEY=�
 Tests, type-check, mutation testing, audit:
 
 ```bash
-npm test           # vitest: 292 tests — API, security, upstream, cache,
+npm test           # vitest: 483 tests — API, security, upstream, cache,
                    # briefing engine, i18n ×27, config, store
 npm run typecheck  # tsc --noEmit
 npm run mutation   # StrykerJS mutation testing (gate: 98% of scored mutants;

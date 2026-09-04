@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.cirrus.weather.data.local.SettingsStore
-import com.cirrus.weather.data.remote.LanguageInfo
+import com.cirrus.weather.data.remote.dto.LanguageInfo
 import com.cirrus.weather.di.AppContainer
 import com.cirrus.weather.notify.NotificationScheduler
 import com.cirrus.weather.notify.Notifier
@@ -135,6 +135,11 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             try {
                 val city = container.activeCity()
+                if (city == null) {
+                    // No cities: there is nothing to preview a briefing for.
+                    _testSend.value = TestSendState.Failed
+                    return@launch
+                }
                 val language = container.settings.notificationLanguage.first()
                 val units = container.settings.unitPref.first().key
                 val briefing = container.cirrusApi.briefing(
@@ -144,12 +149,14 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
                     languageCode = language,
                     units = units,
                 )
-                Notifier.showBriefing(
+                // The post itself can fail (permission revoked in system
+                // settings) — report that honestly instead of "sent".
+                val posted = Notifier.showBriefing(
                     container.appContext,
                     title = briefing.title.ifBlank { city.displayName },
                     body = briefing.body,
                 )
-                _testSend.value = TestSendState.Sent
+                _testSend.value = if (posted) TestSendState.Sent else TestSendState.Failed
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {

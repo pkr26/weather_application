@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -11,6 +12,7 @@ import com.cirrus.weather.domain.SavedCity
 import com.cirrus.weather.domain.UnitPref
 import com.cirrus.weather.notify.DeviceIdentity
 import com.cirrus.weather.notify.DeviceRegistrar
+import com.cirrus.weather.notify.NotificationPrefs
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -32,7 +34,7 @@ private val Context.dataStore by preferencesDataStore(name = "cirrus_settings")
 class SettingsStore(
     context: Context,
     private val vault: SecretVault = KeystoreSecretVault(context),
-) : DeviceIdentity, DeviceRegistrar.RegistrationSettings {
+) : DeviceIdentity, DeviceRegistrar.RegistrationSettings, NotificationPrefs {
 
     private val json = Json { ignoreUnknownKeys = true }
     private val store = context.dataStore
@@ -49,6 +51,7 @@ class SettingsStore(
     private val deviceIdKey = stringPreferencesKey("device_id")
     private val deviceSecretKey = stringPreferencesKey("device_secret")
     private val onboardingDoneKey = booleanPreferencesKey("onboarding_done")
+    private val lastBriefingAtKey = longPreferencesKey("last_briefing_posted_at_ms")
 
     /** Serializes id/secret first-use minting across concurrent callers. */
     private val identityMutex = Mutex()
@@ -131,12 +134,15 @@ class SettingsStore(
     override suspend fun secret(): String? {
         vault.get()?.let { return it }
         val legacy = store.data.first()[deviceSecretKey] ?: return null
-        vault.set(legacy)
-        store.edit { it.remove(deviceSecretKey) }
+        // Scrub the plaintext copy ONLY once the vault confirmed the write —
+        // on a broken vault this must stay the last surviving copy.
+        if (vault.set(legacy)) {
+            store.edit { it.remove(deviceSecretKey) }
+        }
         return legacy
     }
 
-    override suspend fun storeSecret(secret: String) = vault.set(secret)
+    override suspend fun storeSecret(secret: String): Boolean = vault.set(secret)
 
     /** Forgets the whole identity: a 401 from the registry means the server
      *  no longer knows this device, so the next register() mints fresh. */
@@ -159,6 +165,18 @@ class SettingsStore(
     override suspend fun units(): String = unitPref.first().key
 
     override suspend fun alertsEnabled(): Boolean = notificationsEnabled.first()
+
+    // ---- NotificationPrefs: the use cases' (test-friendly) slice.
+
+    override suspend fun notifLanguage(): String = notificationLanguage.first()
+
+    override suspend fun unitsKey(): String = unitPref.first().key
+
+    override suspend fun seenKeys(): Set<String> = seenAlertKeys.first()
+
+    override suspend fun markSeen(keys: Set<String>) = markAlertsSeen(keys)
+
+    override suspend fun recordBriefingPostedAt(epochMs: Long) = setLastBriefingPostedAt(epochMs)
 
     private data class DecodedCities(val cities: List<SavedCity>, val corrupted: Boolean)
 
@@ -204,6 +222,23 @@ class SettingsStore(
     suspend fun setNotificationTimeMinutes(minutes: Int) {
         store.edit { prefs ->
             prefs[notifTimeKey] = minutes.coerceIn(0, 24 * 60 - 1)
+        }
+    }
+
+    /**
+     * Wall-clock epoch ms when the briefing last actually posted (0 = never).
+     * Lets a boot / timezone reschedule notice that today's briefing was
+     * missed while the device was offline and catch up instead of silently
+     * jumping to tomorrow — while the 20-hour window stops a timezone hop
+     * across local midnight from double-posting within hours of the real one.
+     */
+    val lastBriefingPostedAt: Flow<Long> = store.data.map { prefs ->
+        prefs[lastBriefingAtKey] ?: 0L
+    }
+
+    suspend fun setLastBriefingPostedAt(epochMs: Long) {
+        store.edit { prefs ->
+            prefs[lastBriefingAtKey] = epochMs
         }
     }
 

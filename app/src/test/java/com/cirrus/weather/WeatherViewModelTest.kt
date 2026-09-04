@@ -1,10 +1,10 @@
 package com.cirrus.weather
 
-import com.cirrus.weather.data.remote.BundleResponse
+import com.cirrus.weather.data.remote.dto.BundleResponse
 import com.cirrus.weather.data.remote.CirrusApi
 import com.cirrus.weather.data.remote.GeocodingResponse
 import com.cirrus.weather.data.remote.ReverseGeocodeResponse
-import com.cirrus.weather.data.remote.LanguagesResponse
+import com.cirrus.weather.data.remote.dto.LanguagesResponse
 import com.cirrus.weather.data.remote.dto.CurrentConditionsResponse
 import com.cirrus.weather.data.remote.dto.TimeZoneDto
 import com.cirrus.weather.data.repo.WeatherRepository
@@ -52,7 +52,7 @@ private class FakeApi(var behavior: suspend (Double, Double) -> BundleResponse) 
         city: String,
         languageCode: String,
         units: String,
-    ): com.cirrus.weather.data.remote.BriefingResponse = com.cirrus.weather.data.remote.BriefingResponse()
+    ): com.cirrus.weather.data.remote.dto.BriefingResponse = com.cirrus.weather.data.remote.dto.BriefingResponse()
 
     override suspend fun alerts(
         latitude: Double,
@@ -62,10 +62,10 @@ private class FakeApi(var behavior: suspend (Double, Double) -> BundleResponse) 
         com.cirrus.weather.data.remote.dto.PublicAlertsResponse()
 
     override suspend fun registerDevice(
-        body: com.cirrus.weather.data.remote.DeviceRegistrationRequest,
+        body: com.cirrus.weather.data.remote.dto.DeviceRegistrationRequest,
         deviceSecret: String?,
-    ): com.cirrus.weather.data.remote.DeviceRegistrationResponse =
-        com.cirrus.weather.data.remote.DeviceRegistrationResponse()
+    ): com.cirrus.weather.data.remote.dto.DeviceRegistrationResponse =
+        com.cirrus.weather.data.remote.dto.DeviceRegistrationResponse()
 }
 
 class WeatherViewModelTest {
@@ -192,12 +192,33 @@ class WeatherViewModelTest {
     }
 
     @Test
-    fun `a failed first load still surfaces the full error screen`() = runTest(dispatcher) {
+    fun `re-locating (same id, new coordinates) reloads`() = runTest(dispatcher) {
         withViewModel { vm ->
-            api.behavior = { _, _ -> throw IOException("backend down") }
             vm.setCity(hyderabad)
             runCurrent()
-            // Nothing good to keep: the stale flag must not mask the error.
+            assertEquals(1, api.bundleCalls)
+
+            // The device moved: same id "device-like", new pin — the screen
+            // must follow the pin, not the row id.
+            vm.setCity(hyderabad.copy(latitude = 18.0, longitude = 79.0))
+            runCurrent()
+            assertEquals(2, api.bundleCalls)
+        }
+    }
+
+    @Test
+    fun `offline city switch never shows the previous city as stale`() = runTest(dispatcher) {
+        withViewModel { vm ->
+            vm.setCity(hyderabad)
+            runCurrent()
+            assertTrue(vm.state.value is WeatherUiState.Ready)
+
+            // Delhi fails while Hyderabad's good data is on screen: the old
+            // content belongs to a different city and must NOT be passed off
+            // as Delhi's "last forecast" — the error screen is the honest answer.
+            api.behavior = { _, _ -> throw IOException("backend down") }
+            vm.setCity(delhi)
+            runCurrent()
             assertTrue(vm.state.value is WeatherUiState.Error)
         }
     }

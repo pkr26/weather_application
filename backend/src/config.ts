@@ -25,6 +25,13 @@ const envSchema = z.object({
   UPSTREAM_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
   /** Base delay between retries: backoffMs * 2^attempt, ±30% jitter. */
   UPSTREAM_RETRY_BACKOFF_MS: z.coerce.number().int().min(0).default(100),
+  /**
+   * Whole-request budget for one bundle fan-out (all five upstream calls
+   * including retries/backoff). Without it, a brownout can pin a socket for
+   * per-attempt-timeout × attempts; with it, the request answers 502 within
+   * the budget and the client's own retry policy takes over.
+   */
+  UPSTREAM_DEADLINE_MS: z.coerce.number().int().positive().default(20_000),
 
   // Weather payloads are cached to keep upstream quota usage low.
   CACHE_TTL_MS: z.coerce.number().int().positive().default(10 * 60 * 1000),
@@ -72,8 +79,8 @@ const envSchema = z.object({
   /**
    * Optional shared bearer token for the whole API surface. Empty (default)
    * leaves the API open as before; when set, every request except
-   * GET /health must present it as X-Api-Token. Meant for deployments where
-   * the backend is publicly reachable and must not proxy the metered
+   * GET /api/v1/health must present it as X-Api-Token. Meant for deployments
+   * where the backend is publicly reachable and must not proxy the metered
    * weather API for strangers.
    */
   API_TOKEN: z.string().default(''),
@@ -95,7 +102,19 @@ const envSchema = z.object({
     .default(process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
 })
 
-export type Config = z.infer<typeof envSchema>
+// The whole-request deadline must exceed one upstream attempt, or every
+// first attempt would be stillborn.
+const schema = envSchema.superRefine((v, ctx) => {
+  if (v.UPSTREAM_DEADLINE_MS <= v.UPSTREAM_TIMEOUT_MS) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['UPSTREAM_DEADLINE_MS'],
+      message: 'UPSTREAM_DEADLINE_MS must exceed UPSTREAM_TIMEOUT_MS',
+    })
+  }
+})
+
+export type Config = z.infer<typeof schema>
 
 let cached: Config | null = null
 
@@ -107,14 +126,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...env,
     DEVICE_RATE_LIMIT_MAX: env.DEVICE_RATE_LIMIT_MAX ?? env.DEVICE_WRITE_RATE_LIMIT_MAX,
   }
-  const parsed = envSchema.safeParse(effective)
+  const parsed = schema.safeParse(effective)
   if (!parsed.success) {
     // Stryker disable StringLiteral: the dash prefix is pinned by the
     // 'names the missing key' assertion — hand-verified kill that the
     // sandbox miscounts (verified twice by hand-mutation).
     const issues = parsed.error.issues
       .map((i) => `  - ${i.path.join('.')}: ${i.message}`)
-    // Stryker restore
+    // Stryker restore StringLiteral
       .join('\n')
     throw new Error(`Invalid configuration:\n${issues}`)
   }

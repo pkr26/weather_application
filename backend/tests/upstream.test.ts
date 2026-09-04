@@ -28,6 +28,63 @@ const coord = { latitude: 17.38, longitude: 78.48 }
 
 afterEach(() => vi.unstubAllGlobals())
 
+describe('parseRetryAfterMs', () => {
+  it('parses delay-seconds and applies the cap', async () => {
+    const { parseRetryAfterMs } = await import('../src/upstream/http.js')
+    expect(parseRetryAfterMs('2')).toBe(2_000)
+    expect(parseRetryAfterMs('120')).toBe(5_000) // capped
+    expect(parseRetryAfterMs('0')).toBe(0)
+    expect(parseRetryAfterMs(null)).toBe(0)
+  })
+
+  it('parses HTTP-date form relative to now', async () => {
+    const { parseRetryAfterMs } = await import('../src/upstream/http.js')
+    const now = Date.now()
+    const in3s = new Date(now + 3_000).toUTCString()
+    // toUTCString truncates to whole seconds — accept the truncation window.
+    const parsed = parseRetryAfterMs(in3s, now)
+    expect(parsed).toBeGreaterThanOrEqual(2_000)
+    expect(parsed).toBeLessThanOrEqual(3_000)
+    const past = new Date(now - 60_000).toUTCString()
+    expect(parseRetryAfterMs(past, now)).toBe(0) // a past date asks for no wait
+  })
+
+  it('returns 0 for garbage values', async () => {
+    const { parseRetryAfterMs } = await import('../src/upstream/http.js')
+    expect(parseRetryAfterMs('soon', Date.now())).toBe(0)
+  })
+})
+
+describe('GoogleWeatherClient per-language alerts breaker', () => {
+  it('opens the breaker for one language without failing fast for another', async () => {
+    const calls: Array<string | null> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL | Request) => {
+        const s = String(url)
+        const lang = s.match(/languageCode=([a-z-]+)/)?.[1] ?? null
+        calls.push(lang)
+        if (s.includes('publicAlerts')) {
+          if (lang === 'xx') return jsonResponse({ detail: 'unsupported' }, 400)
+          return jsonResponse({ weatherAlerts: [] })
+        }
+        return jsonResponse({ ok: true })
+      }),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0', BREAKER_FAILURES: '2' }))
+    // Two consecutive 400s for the unsupported language…
+    await expect(client.publicAlerts(coord, 'xx')).rejects.toBeInstanceOf(UpstreamError)
+    await expect(client.publicAlerts(coord, 'xx')).rejects.toBeInstanceOf(UpstreamError)
+    // …open that language's breaker only…
+    await expect(client.publicAlerts(coord, 'xx')).rejects.toThrow(/breaker open/)
+    // …while every other language still reaches the upstream.
+    expect(await client.publicAlerts(coord, 'te')).toEqual({ weatherAlerts: [] })
+    expect(await client.publicAlerts(coord, 'en')).toEqual({ weatherAlerts: [] })
+    expect(calls.filter((l) => l === 'xx').length).toBe(2)
+    expect(calls.filter((l) => l === 'te').length).toBe(1)
+  })
+})
+
 describe('GoogleWeatherClient', () => {
   it('sends the API key in the dedicated header and returns parsed JSON', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ hello: 'world' }))
@@ -56,11 +113,23 @@ describe('GoogleWeatherClient', () => {
   })
 
   it('does not retry permanent 4xx answers even when retries are available', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ detail: 'quota' }, 429))
+    const fetchMock = vi.fn(async () => jsonResponse({ detail: 'forbidden' }, 403))
     vi.stubGlobal('fetch', fetchMock)
     const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '3' }))
     await expect(client.currentConditions(coord)).rejects.toBeInstanceOf(UpstreamError)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries 429 throttling answers — they can heal', async () => {
+    let calls = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      calls++
+      if (calls < 2) return jsonResponse({ detail: 'slow down' }, 429)
+      return jsonResponse({ ok: true })
+    }))
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '2' }))
+    expect(await client.currentConditions(coord)).toEqual({ ok: true })
+    expect(calls).toBe(2)
   })
 
   it('retries transient upstream failures and succeeds on a later attempt', async () => {
@@ -68,12 +137,12 @@ describe('GoogleWeatherClient', () => {
     vi.stubGlobal('fetch', vi.fn(async () => {
       calls++
       if (calls < 3) return jsonResponse({ error: 'internal' }, 500)
-      return jsonResponse({ ok: true })
+      return jsonResponse({ forecastHours: [{ interval: { startTime: '2026-09-04T00:00:00Z' } }] })
     }))
     const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '2' }))
 
-    const result = await client.forecastHours(coord)
-    expect(result).toEqual({ ok: true })
+    const result = (await client.forecastHours(coord)) as { forecastHours: unknown[] }
+    expect(result.forecastHours).toHaveLength(1)
     expect(calls).toBe(3)
   })
 
@@ -150,10 +219,36 @@ describe('GoogleWeatherClient', () => {
   })
 
   it('marks a fully successful bundle as not degraded', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true })))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL | Request) => {
+        const s = String(url)
+        if (s.includes('hours:lookup')) return jsonResponse({ forecastHours: [{ h: 1 }] })
+        if (s.includes('days:lookup')) return jsonResponse({ forecastDays: [{ d: 1 }] })
+        return jsonResponse({ ok: true })
+      }),
+    )
     const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
     const bundle = await client.bundle(coord)
     expect(bundle.degraded).toBe(false)
+  })
+
+  it('treats a first page without its list key as a soft failure, not an answer', async () => {
+    // Upstream contract change (renamed field): previously the empty pass-
+    // through was served and cached as healthy.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL | Request) => {
+        const s = String(url)
+        if (s.includes('currentConditions')) return jsonResponse({ temp: 30 })
+        if (s.includes('hours:lookup')) return jsonResponse({ renamedHours: [{}] })
+        if (s.includes('days:lookup')) return jsonResponse({ forecastDays: [{}] })
+        return jsonResponse({ ok: true })
+      }),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    const bundle = await client.bundle(coord)
+    expect(bundle.degraded).toBe(true)
   })
 
   it('marks the core bundle degraded when pagination truncated a list', async () => {
@@ -466,7 +561,7 @@ describe('GoogleWeatherClient request shapes', () => {
     run: (client: GoogleWeatherClient) => Promise<unknown>,
     expect: (url: URL) => void,
   ) => {
-    const fetchMock = vi.fn(async () => jsonResponse({}))
+    const fetchMock = vi.fn(async () => jsonResponse({ forecastHours: [], forecastDays: [] }))
     vi.stubGlobal('fetch', fetchMock)
     const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
     await run(client)
@@ -532,7 +627,7 @@ describe('GoogleWeatherClient request shapes', () => {
       },
     )
     // The bundle's fifth call is publicAlerts, in English by default.
-    const fetchMock = vi.fn(async () => jsonResponse({}))
+    const fetchMock = vi.fn(async () => jsonResponse({ forecastHours: [], forecastDays: [] }))
     vi.stubGlobal('fetch', fetchMock)
     const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
     await client.bundle({ latitude: 1.23456, longitude: 2 })
@@ -623,5 +718,577 @@ describe('GoogleWeatherClient request shapes', () => {
     expect(err).toBeInstanceOf(UpstreamError)
     expect(err.message).toContain('429')
     expect(err.message.length).toBeLessThan(300)
+  })
+})
+
+describe('fetchJsonWithRetry external request scope', () => {
+  const base = {
+    url: new URL('https://upstream.test/x'),
+    timeoutMs: 5_000,
+    retries: 2,
+    backoffMs: 1,
+    label: 'test',
+  }
+
+  it('an already-aborted scope fails fast without fetching', async () => {
+    const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(
+      fetchJsonWithRetry({ ...base, signal: controller.signal }),
+    ).rejects.toThrow(/aborted: request scope closed/)
+    expect(fetchMock).toHaveBeenCalledTimes(1) // one attempt, zero retries
+  })
+
+  it('a scope aborted mid-flight cancels the in-progress fetch', async () => {
+    const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+    const controller = new AbortController()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: URL, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            )
+            setTimeout(() => controller.abort(), 10)
+          }),
+      ),
+    )
+    await expect(
+      fetchJsonWithRetry({ ...base, signal: controller.signal }),
+    ).rejects.toThrow(/aborted: request scope closed/)
+  })
+})
+
+describe('fetchJsonWithRetry error-body handling', () => {
+  it('tolerates an unreadable error body', async () => {
+    const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 500,
+        headers: { get: () => null },
+        json: async () => ({}),
+        text: async () => {
+          throw new Error('body stream broken')
+        },
+      }) as Response),
+    )
+    await expect(
+      fetchJsonWithRetry({
+        url: new URL('https://upstream.test/x'),
+        timeoutMs: 5_000,
+        retries: 0,
+        backoffMs: 1,
+        label: 'test',
+      }),
+    ).rejects.toThrow(/failed: 500/)
+  })
+})
+
+describe('fetchJsonWithRetry honours Retry-After headers', () => {
+  it('uses the upstream delay hint for the retry spacing', async () => {
+    const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+    let calls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        calls++
+        if (calls === 1) {
+          return {
+            ok: false,
+            status: 429,
+            headers: { get: (h: string) => (h === 'retry-after' ? '1' : null) },
+            json: async () => ({}),
+            text: async () => 'slow down',
+          } as Response
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          json: async () => ({ recovered: true }),
+          text: async () => '',
+        } as Response
+      }),
+    )
+    const result = await fetchJsonWithRetry({
+      url: new URL('https://upstream.test/x'),
+      timeoutMs: 5_000,
+      retries: 2,
+      backoffMs: 1,
+      label: 'test',
+    })
+    expect(result).toEqual({ recovered: true })
+    expect(calls).toBe(2)
+  })
+})
+
+describe('paged fetch terminal page', () => {
+  it('stops when the last page carries no nextPageToken', async () => {
+    const pages = [
+      { forecastHours: [{ i: 1 }], nextPageToken: 't2' },
+      { forecastHours: [{ i: 2 }] }, // terminal: token absent, not a string
+    ]
+    let call = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(pages[Math.min(call++, pages.length - 1)])),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    const out = (await client.forecastHours(coord)) as { forecastHours: unknown[] }
+    expect(out.forecastHours).toHaveLength(2)
+    expect(out.nextPageToken).toBeUndefined()
+  })
+})
+
+describe('paged fetch with a shapeless later page', () => {
+  it('treats a later page without the list key as empty and terminates', async () => {
+    const pages = [
+      { forecastHours: [{ i: 1 }], nextPageToken: 't2' },
+      { unrelated: true }, // contract broke mid-pagination — no key, no token
+    ]
+    let call = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(pages[Math.min(call++, pages.length - 1)])),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    const out = (await client.forecastHours(coord)) as { forecastHours: unknown[] }
+    expect(out.forecastHours).toHaveLength(1)
+  })
+})
+
+describe('circuit breaker bookkeeping', () => {
+  it('does NOT open after a single failure when BREAKER_FAILURES=2', async () => {
+    let calls = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      calls++
+      return calls === 1 ? jsonResponse({ error: 'x' }, 500) : jsonResponse({ ok: true })
+    }))
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0', BREAKER_FAILURES: '2' }))
+    await expect(client.currentConditions(coord)).rejects.toBeInstanceOf(UpstreamError) // failure 1
+    // Breaker still closed: the very next call reaches the upstream.
+    expect(await client.currentConditions(coord)).toEqual({ ok: true })
+  })
+
+  it('resets the failure count after a success', async () => {
+    let calls = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      calls++
+      // fail (1) → success (2, resets) → fail (3) → success (4)
+      return calls === 1 || calls === 3 ? jsonResponse({ error: 'x' }, 500) : jsonResponse({ ok: true })
+    }))
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0', BREAKER_FAILURES: '2' }))
+    await expect(client.currentConditions(coord)).rejects.toBeInstanceOf(UpstreamError) // failure 1
+    expect(await client.currentConditions(coord)).toEqual({ ok: true })                // success resets
+    await expect(client.currentConditions(coord)).rejects.toBeInstanceOf(UpstreamError) // failure 1 again
+    // One failure after a reset must NOT trip a 2-failure breaker.
+    expect(await client.currentConditions(coord)).toEqual({ ok: true })
+  })
+})
+
+describe('pagination break conditions', () => {
+  it('stops after a page that already satisfies the target', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ forecastHours: Array.from({ length: 72 }, (_, i) => ({ i })), nextPageToken: 'more' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    const out = (await client.forecastHours(coord)) as { forecastHours: unknown[] }
+    expect(out.forecastHours).toHaveLength(72)
+    expect(fetchMock).toHaveBeenCalledTimes(1) // target met — no second page
+  })
+
+  it('marks the bundle degraded when a LATER page fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL | Request) => {
+        const sUrl = String(url)
+        if (sUrl.includes('currentConditions')) return jsonResponse({ temp: 30 })
+        // Hours page 1 healthy with a token; page 2 dies mid-pagination.
+        if (sUrl.includes('hours:lookup') && !sUrl.includes('pageToken')) {
+          return jsonResponse({ forecastHours: [{ i: 1 }], nextPageToken: 't2' })
+        }
+        if (sUrl.includes('hours:lookup')) return jsonResponse({ error: 'down' }, 500)
+        if (sUrl.includes('days:lookup')) return jsonResponse({ forecastDays: [{ d: 1 }] })
+        return jsonResponse({ h: 1 })
+      }),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    const bundle = await client.coreBundle(coord)
+    expect(bundle.degraded).toBe(true)
+    expect((bundle.forecastHours as { forecastHours: unknown[] }).forecastHours).toHaveLength(1)
+  })
+
+  it('marks the bundle degraded when only the DAYS pagination truncates', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL | Request) => {
+        const sUrl = String(url)
+        if (sUrl.includes('currentConditions')) return jsonResponse({ temp: 30 })
+        if (sUrl.includes('hours:lookup')) return jsonResponse({ forecastHours: [{ i: 1 }] })
+        if (sUrl.includes('days:lookup') && !sUrl.includes('pageToken')) {
+          return jsonResponse({ forecastDays: [{ d: 1 }], nextPageToken: 't2' })
+        }
+        if (sUrl.includes('days:lookup')) return jsonResponse({ error: 'down' }, 500)
+        return jsonResponse({ h: 1 })
+      }),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    const bundle = await client.coreBundle(coord)
+    expect(bundle.degraded).toBe(true)
+  })
+
+  it('bundle is degraded when ONLY the alerts endpoint fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL | Request) => {
+        const sUrl = String(url)
+        if (sUrl.includes('hours:lookup')) return jsonResponse({ forecastHours: [{ i: 1 }] })
+        if (sUrl.includes('days:lookup')) return jsonResponse({ forecastDays: [{ d: 1 }] })
+        if (sUrl.includes('publicAlerts')) return jsonResponse({ error: 'gone' }, 500)
+        return jsonResponse({ temp: 30 })
+      }),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    const bundle = await client.bundle(coord)
+    expect(bundle.degraded).toBe(true)
+    // Everything else stayed healthy.
+    expect(bundle.currentConditions).toEqual({ temp: 30 })
+  })
+})
+
+describe('retry spacing bounds are deterministic', () => {
+  it('attempt 2 waits the full jittered backoff window (>=70ms with base 100)', async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        calls++
+        if (calls === 1) return jsonResponse({ error: 'x' }, 500)
+        return jsonResponse({ ok: true })
+      }))
+      const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+      const pending = fetchJsonWithRetry({
+        url: new URL('https://upstream.test/x'),
+        timeoutMs: 5_000,
+        retries: 2,
+        backoffMs: 100,
+        label: 'test',
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls).toBe(1)
+      // Jitter window for attempt 0 is [70, 130] ms: 69 ms must NOT be enough.
+      await vi.advanceTimersByTimeAsync(69)
+      expect(calls).toBe(1)
+      await vi.advanceTimersByTimeAsync(70)
+      expect(calls).toBe(2)
+      await expect(pending).resolves.toEqual({ ok: true })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('Retry-After wins over the jittered backoff', () => {
+  it('waits the upstream hint, not the smaller backoff', async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        calls++
+        if (calls === 1) {
+          return {
+            ok: false,
+            status: 429,
+            headers: { get: (h: string) => (h === 'retry-after' ? '1' : null) },
+            json: async () => ({}),
+            text: async () => 'slow down',
+          } as Response
+        }
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ ok: 1 }), text: async () => '' } as Response
+      }))
+      const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+      const pending = fetchJsonWithRetry({
+        url: new URL('https://upstream.test/x'),
+        timeoutMs: 5_000,
+        retries: 2,
+        backoffMs: 100,
+        label: 't',
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(calls).toBe(1) // Retry-After says 1s — the 100ms backoff must NOT win
+      await vi.advanceTimersByTimeAsync(600)
+      expect(calls).toBe(2)
+      await expect(pending).resolves.toEqual({ ok: 1 })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('GeocodingClient request shapes', () => {
+  it('reverse geocoding passes exact coordinates', async () => {
+    const { GeocodingClient } = await import('../src/upstream/openMeteo.js')
+    const fetchMock = vi.fn(async () => jsonResponse({ city: 'Testville' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new GeocodingClient(makeConfig())
+    const out = (await client.reverse(17.385678, -0.123456)) as { name: string | null }
+    expect(out.name).toBe('Testville')
+    const url = fetchMock.mock.calls[0][0] as URL
+    expect(url.searchParams.get('latitude')).toBe('17.385678')
+    expect(url.searchParams.get('longitude')).toBe('-0.123456')
+    expect(url.searchParams.get('localityLanguage')).toBe('en')
+  })
+})
+
+describe('per-endpoint signal threading', () => {
+  it('currentConditions aborts through its pass-through options', async () => {
+    const controller = new AbortController()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: URL, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            )
+            setTimeout(() => controller.abort(), 10)
+          }),
+      ),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    await expect(
+      client.currentConditions(coord, controller.signal),
+    ).rejects.toThrow(/aborted: request scope closed/)
+  })
+
+  it('historyHours aborts through its pass-through options', async () => {
+    const controller = new AbortController()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: URL, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            )
+            setTimeout(() => controller.abort(), 10)
+          }),
+      ),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    await expect(
+      client.historyHours(coord, 24, controller.signal),
+    ).rejects.toThrow(/aborted: request scope closed/)
+  })
+
+  it('aborted calls do not count toward the circuit breaker', async () => {
+    // ONE client (one breaker) across five aborted calls: with a
+    // 2-failure breaker, counting aborts would open it and the final
+    // success would fail fast.
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0', BREAKER_FAILURES: '2' }))
+    for (let i = 0; i < 5; i++) {
+      const controller = new AbortController()
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          (_url: URL, init: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              init.signal?.addEventListener('abort', () =>
+                reject(new DOMException('aborted', 'AbortError')),
+              )
+              setTimeout(() => controller.abort(), 5)
+            }),
+        ),
+      )
+      await expect(
+        client.currentConditions(coord, controller.signal),
+      ).rejects.toThrow(/aborted: request scope closed/)
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ok: true })))
+    expect(await client.currentConditions(coord)).toEqual({ ok: true })
+  })
+})
+
+describe('attempt-1 retry spacing and uncapped hint carry', () => {
+  it('attempt 1 waits the doubled backoff window (>=140ms with base 100)', async () => {
+    vi.useFakeTimers()
+    const rand = vi.spyOn(Math, 'random').mockReturnValue(0) // jitter = 0.7x exactly
+    try {
+      let calls = 0
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        calls++
+        if (calls <= 2) return jsonResponse({ error: 'x' }, 500)
+        return jsonResponse({ forecastHours: [{ i: 1 }] })
+      }))
+      const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+      const pending = fetchJsonWithRetry({
+        url: new URL('https://upstream.test/x'),
+        timeoutMs: 5_000,
+        retries: 2,
+        backoffMs: 100,
+        label: 't',
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(140) // first retry happened, second not yet
+      expect(calls).toBe(2)
+      // Worst case for attempt 1: attempt 0 fired at t≈130, its delay is
+      // 200×[0.7,1.3] ≤ 260 → attempt 1 fires by t≈390.
+      await vi.advanceTimersByTimeAsync(400)
+      expect(calls).toBe(3)
+      await expect(pending).resolves.toBeDefined()
+    } finally {
+      rand.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('the error carries the UNCAPPED upstream hint for forwarding', async () => {
+    const { fetchJsonWithRetry, UpstreamError } = await import('../src/upstream/http.js')
+    const { UpstreamError: UE } = await import('../src/errors.js')
+    void UpstreamError
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 429,
+        headers: { get: (h: string) => (h === 'retry-after' ? '120' : null) },
+        json: async () => ({}),
+        text: async () => 'slow down',
+      }) as Response),
+    )
+    const err = await fetchJsonWithRetry({
+      url: new URL('https://upstream.test/x'),
+      timeoutMs: 5_000,
+      retries: 0,
+      backoffMs: 1,
+      label: 't',
+    }).catch((e: unknown) => e as InstanceType<typeof UE>)
+    expect(err).toBeInstanceOf(UE)
+    expect((err as InstanceType<typeof UE>).retryAfterMs).toBe(5_000) // our sleep: capped
+    expect((err as InstanceType<typeof UE>).forwardRetryAfterMs).toBe(120_000) // client: uncapped
+  })
+})
+
+describe('non-UpstreamError failures are never retried', () => {
+  it('a network error with retries available still makes exactly one attempt', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError('fetch failed')
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+    await expect(
+      fetchJsonWithRetry({
+        url: new URL('https://upstream.test/x'),
+        timeoutMs: 5_000,
+        retries: 2,
+        backoffMs: 1,
+        label: 't',
+      }),
+    ).rejects.toThrow(/unreachable/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('lingering-token truncation derivation', () => {
+  it('a satisfied target with a lingering nextPageToken is NOT truncated', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL | Request) => {
+        const sUrl = String(url)
+        if (sUrl.includes('hours:lookup')) {
+          return jsonResponse({ forecastHours: Array.from({ length: 72 }, (_, i) => ({ i })), nextPageToken: 'more' })
+        }
+        if (sUrl.includes('days:lookup')) return jsonResponse({ forecastDays: [{ d: 1 }] })
+        return jsonResponse({ ok: true })
+      }),
+    )
+    const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '0' }))
+    const bundle = await client.coreBundle(coord)
+    expect(bundle.degraded).toBe(false)
+  })
+})
+
+describe('exponential backoff arithmetic (deterministic jitter)', () => {
+  it('the attempt-1 delay is 2x the attempt-0 delay (200 vs 100 base)', async () => {
+    vi.useFakeTimers()
+    const rand = vi.spyOn(Math, 'random').mockReturnValue(0)
+    try {
+      let calls = 0
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        calls++
+        if (calls <= 2) return jsonResponse({ error: 'x' }, 500)
+        return jsonResponse({ forecastHours: [{ i: 1 }] })
+      }))
+      const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+      const pending = fetchJsonWithRetry({
+        url: new URL('https://upstream.test/x'),
+        timeoutMs: 5_000,
+        retries: 2,
+        backoffMs: 100,
+        label: 't',
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls).toBe(1)
+      await vi.advanceTimersByTimeAsync(69)
+      expect(calls).toBe(1) // attempt-0 sleep is exactly 70
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toBe(2) // …and fires at exactly 70
+      await vi.advanceTimersByTimeAsync(139)
+      expect(calls).toBe(2) // attempt-1 sleep is exactly 140 (200*0.7)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toBe(3) // …firing at exactly +140
+      await expect(pending).resolves.toBeDefined()
+    } finally {
+      rand.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('a scope aborted during the backoff sleep fails fast without retrying', async () => {
+    vi.useFakeTimers()
+    try {
+      let calls = 0
+      const controller = new AbortController()
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        calls++
+        return jsonResponse({ error: 'x' }, 500)
+      }))
+      const { fetchJsonWithRetry } = await import('../src/upstream/http.js')
+      const pending = fetchJsonWithRetry({
+        url: new URL('https://upstream.test/x'),
+        timeoutMs: 5_000,
+        retries: 3,
+        backoffMs: 1_000,
+        label: 't',
+        signal: controller.signal,
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls).toBe(1)
+      controller.abort() // client hangs up during the backoff sleep
+      await expect(pending).rejects.toThrow(/aborted: request scope closed/)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(calls).toBe(1) // the aborted sleep must not fire another attempt
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('abort-aware sleep', () => {
+  it('rejects immediately when the scope is already dead', async () => {
+    const { sleep } = await import('../src/upstream/http.js')
+    const dead = new AbortController()
+    dead.abort()
+    await expect(sleep(1_000, dead.signal)).rejects.toThrow()
+    // An un-signalled sleep resolves normally.
+    await expect(sleep(0)).resolves.toBeUndefined()
   })
 })

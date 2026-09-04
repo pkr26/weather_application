@@ -54,6 +54,77 @@ data class PublicAlertsResponse(
     val regionCode: String? = null,
 )
 
+// --------------------------------------------- Cirrus backend API envelope
+
+/** Full weather bundle for one location in a single round-trip. */
+@Serializable
+data class BundleResponse(
+    val currentConditions: CurrentConditionsResponse = CurrentConditionsResponse(),
+    val forecastHours: ForecastHoursResponse = ForecastHoursResponse(),
+    val forecastDays: ForecastDaysResponse = ForecastDaysResponse(),
+    val historyHours: HistoryHoursResponse = HistoryHoursResponse(),
+    val publicAlerts: PublicAlertsResponse = PublicAlertsResponse(),
+)
+
+/** One entry of the backend's notification-language catalog. */
+@Serializable
+data class LanguageInfo(
+    val code: String,
+    val nativeName: String,
+    val englishName: String,
+    val rtl: Boolean = false,
+)
+
+@Serializable
+data class LanguagesResponse(
+    val languages: List<LanguageInfo> = emptyList(),
+)
+
+/** Localized "here's what happening today" notification content. */
+@Serializable
+data class BriefingResponse(
+    val title: String = "",
+    val body: String = "",
+    val condition: String = "",
+    val highC: Double? = null,
+    val lowC: Double? = null,
+    val alertCount: Int = 0,
+    val language: String = "en",
+)
+
+@Serializable
+data class DeviceRegistrationRequest(
+    val deviceId: String,
+    val language: String,
+    val city: DeviceCityRequest,
+    val notificationTime: NotificationTimeRequest,
+    val units: String,
+    val alertsEnabled: Boolean = true,
+)
+
+@Serializable
+data class DeviceRegistrationResponse(
+    val deviceId: String = "",
+    val updatedAt: String = "",
+    /** Present only when the server issued (or rotated) a fresh secret. */
+    val deviceSecret: String? = null,
+)
+
+@Serializable
+data class DeviceCityRequest(
+    val id: String,
+    val name: String,
+    val latitude: Double,
+    val longitude: Double,
+    val timeZone: String? = null,
+)
+
+@Serializable
+data class NotificationTimeRequest(
+    val hour: Int,
+    val minute: Int,
+)
+
 @Serializable
 data class ForecastHourDto(
     val interval: IntervalDto? = null,

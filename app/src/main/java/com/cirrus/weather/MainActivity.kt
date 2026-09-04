@@ -13,6 +13,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -39,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -53,6 +55,7 @@ import com.cirrus.weather.ui.citylist.CityListScreen
 import com.cirrus.weather.ui.citylist.CityListViewModel
 import com.cirrus.weather.ui.components.BrandedLoading
 import com.cirrus.weather.ui.theme.CirrusTheme
+import com.cirrus.weather.ui.theme.rememberReducedMotion
 import com.cirrus.weather.ui.weather.WeatherScreen
 import com.cirrus.weather.ui.weather.WeatherViewModel
 import com.google.android.gms.location.LocationServices
@@ -73,16 +76,34 @@ class MainActivity : ComponentActivity() {
     /** City id from a notification tap — consumed once, then cleared. */
     private val deepLinkCityId = mutableStateOf<String?>(null)
 
+    private companion object {
+        const val STATE_PENDING_DEEP_LINK = "pending_deep_link_city_id"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val container = (application as CirrusApp).container
-        deepLinkCityId.value = intent?.getStringExtra(Notifier.EXTRA_CITY_ID)
+        // A pending (not yet consumed) link survives recreation via the
+        // instance state; a fresh launch reads it from the intent exactly
+        // once (the extra is stripped, so later recreations never replay a
+        // consumed link).
+        deepLinkCityId.value = savedInstanceState?.getString(STATE_PENDING_DEEP_LINK)
+            ?: intent?.getStringExtra(Notifier.EXTRA_CITY_ID)?.also {
+                intent?.removeExtra(Notifier.EXTRA_CITY_ID)
+            }
         setContent {
             CirrusTheme {
                 CirrusAppRoot(container, deepLinkCityId)
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        // Preserve an unconsumed deep link across rotation/font-scale/process
+        // death — the splash gate can delay consumption past a recreation.
+        deepLinkCityId.value?.let { outState.putString(STATE_PENDING_DEEP_LINK, it) }
+        super.onSaveInstanceState(outState)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -128,12 +149,17 @@ private fun CirrusAppRoot(container: AppContainer, deepLinkCityId: androidx.comp
         },
     )
 
-    // Background polling pauses with the screen (ON_STOP) and resumes on
-    // ON_START — no silent 10-minute refresh cycles for pixels nobody sees.
+    // Background polling pauses with the screen (STOPPED) and resumes when
+    // visible again — no silent 10-minute refresh cycles for pixels nobody
+    // sees. Evaluated from lifecycle *state*, not from any single event: the
+    // observer also fires for ON_RESUME (which must keep polling on) and is
+    // replayed on registration while already RESUMED.
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            weatherViewModel.setScreenVisible(event == Lifecycle.Event.ON_START)
+        val observer = LifecycleEventObserver { _, _ ->
+            weatherViewModel.setScreenVisible(
+                lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+            )
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -199,7 +225,7 @@ private fun CirrusAppRoot(container: AppContainer, deepLinkCityId: androidx.comp
     val onboardingDone by remember {
         container.settings.onboardingDone.map { it as Boolean? }
     }.collectAsStateWithLifecycle(initialValue = null)
-    var onboardingHandled by rememberSaveable { mutableStateOf(false) }
+    var onboardingHandled by remember { mutableStateOf(false) }
     if (onboardingDone == false && !onboardingHandled) {
         val hasPermission = ContextCompat.checkSelfPermission(
             container.appContext, Manifest.permission.ACCESS_COARSE_LOCATION
@@ -236,6 +262,9 @@ private fun CirrusAppRoot(container: AppContainer, deepLinkCityId: androidx.comp
 
     // Modal-sheet choreography: the list slides up over the weather screen,
     // which gently sinks and dims; reversed when the sheet is dismissed.
+    // With system animations disabled the sheets snap — motion choreography
+    // is exactly what "reduce motion" asks to remove.
+    val reducedMotion = rememberReducedMotion()
     AnimatedContent(
         targetState = when {
             showSettings -> "settings"
@@ -243,12 +272,14 @@ private fun CirrusAppRoot(container: AppContainer, deepLinkCityId: androidx.comp
             else -> "weather"
         },
         transitionSpec = {
+            val slide = if (reducedMotion) snap<IntOffset>() else tween<IntOffset>(380)
+            val fade = if (reducedMotion) snap<Float>() else tween<Float>(220)
             if (targetState != "weather") {
-                (slideInVertically(tween(380)) { it } + fadeIn(tween(220))) togetherWith
-                    (slideOutVertically(tween(380)) { -it / 10 } + fadeOut(tween(190)))
+                (slideInVertically(slide) { it } + fadeIn(fade)) togetherWith
+                    (slideOutVertically(slide) { -it / 10 } + fadeOut(fade))
             } else {
-                (slideInVertically(tween(380)) { -it / 10 } + fadeIn(tween(240))) togetherWith
-                    (slideOutVertically(tween(380)) { it } + fadeOut(tween(200)))
+                (slideInVertically(slide) { -it / 10 } + fadeIn(fade)) togetherWith
+                    (slideOutVertically(slide) { it } + fadeOut(fade))
             }
         },
         label = "rootNav",
@@ -359,7 +390,7 @@ fun AppContainer.requestDeviceLocation(onResult: (SavedCity?) -> Unit) {
 
         val resolved = SavedCity(
             id = "device",
-            name = place?.name ?: "My Location",
+            name = place?.name ?: appContext.getString(R.string.my_location),
             region = place?.admin1 ?: "",
             country = place?.country ?: "",
             latitude = location.latitude,

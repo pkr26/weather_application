@@ -32,6 +32,10 @@ pitest {
             "com.cirrus.weather.domain.AlertUi",
             "com.cirrus.weather.domain.WeatherBundle",
             "com.cirrus.weather.domain.SavedCity",
+            // Compiler-generated kotlinx.serialization serializers are not
+            // hand-written logic — same rationale as the data classes above.
+            // (PIT class filters are globs, not regexes.)
+            "*\$\$serializer",
         ),
     )
     // Explicit mutator set: the DEFAULTS+STRONGER groups minus

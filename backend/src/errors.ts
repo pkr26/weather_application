@@ -24,6 +24,10 @@ export class UpstreamError extends AppError {
     message: string,
     /** HTTP status the upstream actually returned, if it answered at all. */
     readonly upstreamStatus?: number,
+    /** The upstream's Retry-After hint for OUR OWN retry sleep (capped at 5 s). */
+    readonly retryAfterMs?: number,
+    /** The hint to FORWARD to clients — the upstream's uncapped ask. */
+    readonly forwardRetryAfterMs?: number,
   ) {
     super(502, message, 'upstream_error')
     this.name = 'UpstreamError'
@@ -55,7 +59,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
       // Stryker disable StringLiteral: the join separator is pinned by the
       // exact-details assertion in errors.test.ts (hand-verified kill).
       details: err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
-      // Stryker restore
+      // Stryker restore StringLiteral
     })
     return
   }
@@ -64,12 +68,28 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
       // Full detail (which may quote upstream responses) stays in the log;
       // clients get a stable, non-revealing message.
       logger.error({ err }, err.message)
-      const message =
-        err instanceof UpstreamError
-          ? 'Upstream weather service is unavailable. Try again shortly.'
-          : err instanceof RegistryFullError
-            ? err.message
-            : 'Something went wrong.'
+      if (err instanceof UpstreamError) {
+        // Throttling and maintenance are the two "come back later" answers:
+        // say 503 (not 502) and pass the upstream's own Retry-After through
+        // so well-behaved clients back off instead of hammering.
+        const throttled = err.upstreamStatus === 429 || err.upstreamStatus === 503
+        const hintMs = err.forwardRetryAfterMs ?? err.retryAfterMs
+        // Stryker disable EqualityOperator,ConditionalExpression: the `hintMs &&` guard makes `> 0` ⟺ `>= 0` (a falsy hint short-circuits before the comparison); truth-table arms pinned by the four hint tests
+        const retryAfterSec = throttled && hintMs && hintMs > 0
+          ? Math.max(1, Math.ceil(hintMs / 1000))
+          : undefined
+        // Stryker restore EqualityOperator,ConditionalExpression
+        if (retryAfterSec !== undefined) res.setHeader('Retry-After', String(retryAfterSec))
+        res.status(throttled ? 503 : 502).json({
+          // UpstreamError always carries this code — no fallback branch.
+          error: 'upstream_error',
+          message: throttled
+            ? 'Upstream weather service is throttling. Try again shortly.'
+            : 'Upstream weather service is unavailable. Try again shortly.',
+        })
+        return
+      }
+      const message = err instanceof RegistryFullError ? err.message : 'Something went wrong.'
       res.status(err.status).json({ error: err.code ?? 'error', message })
       return
     }

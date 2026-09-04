@@ -12,13 +12,54 @@ import type { NextFunction, Request, Response } from 'express'
  * exceeds the saving), and the sync gzip call costs ~1 ms for a 150 KB
  * payload — a fair trade for not pulling a middleware dependency into the
  * lockfile.
+ *
+ * Negotiation follows RFC 9110 §12.5.3: token + q-value, case-insensitive,
+ * `gzip;q=0` is an explicit refusal, `*` accepts anything not refused.
+ * `Vary: Accept-Encoding` is set on EVERY response this middleware wraps —
+ * a shared cache that stored the identity variant without the Vary header
+ * could serve it to gzip clients (or double-store both).
  */
 
 const THRESHOLD_BYTES = 1024
 
+/** RFC 9110 Accept-Encoding negotiation for the gzip token only. */
+export function acceptsGzip(header: string): boolean {
+  let wildcardQ: number | null = null
+  let gzipQ: number | null = null
+  for (const part of header.split(',')) {
+    // split never yields an empty array — the destructure always has a token.
+    // Stryker disable MethodExpression: both trims are redundant — token and rawKey are trimmed again downstream, so removing either changes no verdict
+    const [rawToken, ...params] = part.trim().split(';')
+    const token = rawToken!.trim().toLowerCase()
+    if (token !== 'gzip' && token !== '*' && token !== 'x-gzip') continue
+    let q = 1
+    // Stryker restore MethodExpression
+    for (const param of params) {
+      // Stryker disable MethodExpression: see above — rawKey is trimmed again below
+      const [rawKey, rawValue] = param.trim().split('=')
+      if (rawKey!.trim().toLowerCase() === 'q') {
+      // Stryker restore MethodExpression
+        // A missing or malformed value is a malformed directive: refuse (0).
+        const parsed = Number.parseFloat(String(rawValue))
+        q = Number.isNaN(parsed) ? 0 : Math.min(Math.max(parsed, 0), 1)
+      }
+    }
+    if (token === '*') wildcardQ = q
+    else gzipQ = gzipQ === null ? q : Math.max(gzipQ, q)
+  }
+  // An explicit gzip token decides; only its absence falls back to `*`.
+  if (gzipQ !== null) return gzipQ > 0
+  // Stryker disable ConditionalExpression: reachable only when gzipQ is null; with wildcardQ null, `null > 0` is false — identical to the fallthrough return. The if(false) arm is killed by the '*'-only table row.
+  if (wildcardQ !== null) return wildcardQ > 0
+  // Stryker restore ConditionalExpression
+  return false
+}
+
 export function gzipJsonMiddleware(req: Request, res: Response, next: NextFunction): void {
-  const accept = String(req.headers['accept-encoding'] ?? '')
-  if (!accept.includes('gzip')) {
+  // Set before any response is produced: the stored representation's
+  // selection depends on this request header, compressed or not.
+  res.setHeader('Vary', 'Accept-Encoding')
+  if (!acceptsGzip(String(req.headers['accept-encoding'] ?? ''))) {
     next()
     return
   }
@@ -28,10 +69,15 @@ export function gzipJsonMiddleware(req: Request, res: Response, next: NextFuncti
     if (payload.length < THRESHOLD_BYTES) {
       return originalJson(body)
     }
+    // Stryker disable ObjectLiteral: the gzip level changes bytes, never semantics or headers
     const gz = gzipSync(payload, { level: 6 })
+    // Stryker restore ObjectLiteral
     res.setHeader('Content-Encoding', 'gzip')
     res.setHeader('Content-Length', String(gz.length))
-    res.setHeader('Vary', 'Accept-Encoding')
+    // Calling res.end directly bypasses express's res.send — which is what
+    // sets the content type. Without it every compressed response ships
+    // untyped, and strict JSON clients refuse to parse the body.
+    res.setHeader('Content-Type', 'application/json; charset=utf-8')
     // No ETag on the compressed path — express would tag the uncompressed
     // body, and we bypassed its serialization entirely.
     res.removeHeader('ETag')

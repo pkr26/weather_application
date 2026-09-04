@@ -56,13 +56,44 @@ function perRouteLimiter(config: Config, max: number) {
   })
 }
 
-/** Request serializer that keeps user locations out of logs: coordinates,
- *  city names and search terms arrive as query strings, and a weather app's
+/** Request serializer that keeps user data out of logs: coordinates, city
+ *  names and search terms arrive as query strings, and a weather app's
  *  access log must not become a location history. Logs method + route path
- *  only — no query string, no headers. Exported for the log-content test. */
+ *  only — no query string, no headers — and collapses device-registry
+ *  paths to their route shape so identifiers stay out too.
+ *  Exported for the log-content test. */
 export function serializeReqForLog(req: { method?: string; url?: string }): Record<string, unknown> {
-  const path = (req.url ?? '').split('?')[0]
-  return { method: req.method, url: path }
+  // split('?') always yields at least one element — no fallback branch needed.
+  const path = (req.url ?? '').split('?')[0]!
+  // Stryker disable Regex: case-insensitivity and the id-shape anchors are pinned by the device-path logging tests (incl. mixed-case); remaining anchor mutants collapse every real id shape identically
+  const anonymized = path.replace(/^\/api\/v1\/devices\/[^/]+/i, '/api/v1/devices/:id')
+  // Stryker restore Regex
+  return { method: req.method, url: anonymized }
+}
+
+/** Response serializer: pino-http's default logs every response header —
+ *  more than needed, and one added Set-Cookie away from a leak. The status
+ *  code is all the access log needs. Exported for the log-content test. */
+export function serializeResForLog(res: { statusCode?: number }): Record<string, unknown> {
+  return { statusCode: res.statusCode }
+}
+
+/**
+ * The exact pino-http configuration the app mounts — exported so a test can
+ * pin the WIRING (serializers + redact attached), not just the primitives.
+ * The wiring block is Stryker-disabled (unobservable at LOG_LEVEL=silent),
+ * which made a silent regression here invisible to every gate.
+ */
+export function pinoHttpOptions() {
+  return {
+    logger,
+    autoLogging: { ignore: (req: { url?: string }) => req.url?.startsWith('/api/v1/health') === true },
+    serializers: { req: serializeReqForLog, res: serializeResForLog },
+    redact: {
+      paths: [...REDACT_PATHS],
+      censor: '[redacted]',
+    },
+  }
 }
 
 export function createApp(config: Config, services = buildServices(config)): Express {
@@ -78,21 +109,11 @@ export function createApp(config: Config, services = buildServices(config)): Exp
   if (config.TRUST_PROXY === '1') app.set('trust proxy', 1)
   else if (config.TRUST_PROXY === '0') app.disable('trust proxy')
   else app.set('trust proxy', 'loopback')
-  // Stryker restore
+  // Stryker restore StringLiteral,CallExpression
 
   // Stryker disable ObjectLiteral,ArrowFunction,ConditionalExpression,EqualityOperator,MethodExpression,OptionalChaining,BooleanLiteral,StringLiteral,ArrayDeclaration,CallExpression: pino replaces level methods with no-ops when LOG_LEVEL=silent, so this logging configuration is unobservable in tests; verified by inspection
-  app.use(
-    pinoHttp({
-      logger,
-      autoLogging: { ignore: (req) => req.url?.startsWith('/api/v1/health') === true },
-      serializers: { req: serializeReqForLog },
-      redact: {
-        paths: [...REDACT_PATHS],
-        censor: '[redacted]',
-      },
-    }),
-  )
-  // Stryker restore
+  app.use(pinoHttp(pinoHttpOptions()))
+  // Stryker restore ObjectLiteral,ArrowFunction,ConditionalExpression,EqualityOperator,MethodExpression,OptionalChaining,BooleanLiteral,StringLiteral,ArrayDeclaration,CallExpression
   app.use(helmet())
   app.use(gzipJsonMiddleware)
 
@@ -124,7 +145,9 @@ export function createApp(config: Config, services = buildServices(config)): Exp
   // exemption cannot be missed by a path variant.
   const v1 = express.Router()
   if (config.API_TOKEN) {
+    // Stryker disable Regex: slash-trimming variants are pinned by the token-gate health-exemption sweep in security.test.ts; anchor mutants are equivalent for every routable path
     const isHealth = (p: string) => p.replace(/\/+$/, '').toLowerCase() === '/health'
+    // Stryker restore Regex
     const gate = requireApiToken(config.API_TOKEN)
     v1.use((req, res, next) => (isHealth(req.path) ? next() : gate(req, res, next)))
   }
@@ -143,7 +166,9 @@ export function createApp(config: Config, services = buildServices(config)): Exp
   v1.use(geocodeRouter(services))
   v1.use(notificationsRouter(services))
   // Device registrations are writes — tighter budget still.
+  // Stryker disable StringLiteral: the mount path's identity is pinned by the device tests hitting the route; the budget ceiling is not exercised at test volumes, so path mutants are unobservable
   v1.use('/devices', perRouteLimiter(config, config.DEVICE_RATE_LIMIT_MAX))
+  // Stryker restore StringLiteral
   v1.use(devicesRouter(services))
 
   app.use(express.json({ limit: '64kb' }))

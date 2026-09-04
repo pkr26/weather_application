@@ -48,6 +48,12 @@ class WeatherRepository(
         return b.toWeatherBundle().copy(fetchedAt = Instant.ofEpochMilli(fetchedAtMs))
     }
 
+    /** Drops every stored snapshot for a city (all its coordinate variants). */
+    suspend fun clearCityCache(cityId: String) {
+        val store = lastKnown ?: return
+        withContext(Dispatchers.IO) { store.removeAll(cityId) }
+    }
+
     /** Minimal fetch used by the city list cards. */
     suspend fun loadMini(latitude: Double, longitude: Double): CurrentUi =
         api.current(latitude, longitude).toCurrentUi()

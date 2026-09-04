@@ -5,6 +5,8 @@ export default defineConfig({
     // Runs before any test module (and its imports) — silences pino for the
     // whole suite regardless of import order.
     setupFiles: ['tests/setup.ts'],
+    // A leftover Stryker sandbox must never double the suite.
+    exclude: ['**/node_modules/**', '**/dist/**', '.stryker-tmp/**'],
     coverage: {
       provider: 'istanbul',
       include: ['src/**/*.ts'],

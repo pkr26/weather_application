@@ -1,9 +1,14 @@
 package com.cirrus.weather.data.remote
 
+import com.cirrus.weather.data.remote.dto.BriefingResponse
+import com.cirrus.weather.data.remote.dto.BundleResponse
 import com.cirrus.weather.data.remote.dto.CurrentConditionsResponse
+import com.cirrus.weather.data.remote.dto.DeviceRegistrationRequest
+import com.cirrus.weather.data.remote.dto.DeviceRegistrationResponse
 import com.cirrus.weather.data.remote.dto.ForecastDaysResponse
 import com.cirrus.weather.data.remote.dto.ForecastHoursResponse
 import com.cirrus.weather.data.remote.dto.HistoryHoursResponse
+import com.cirrus.weather.data.remote.dto.LanguagesResponse
 import com.cirrus.weather.data.remote.dto.PublicAlertsResponse
 import kotlinx.serialization.Serializable
 import retrofit2.http.Body
@@ -83,71 +88,3 @@ interface CirrusApi {
         @Header("X-Device-Secret") deviceSecret: String? = null,
     ): DeviceRegistrationResponse
 }
-
-// ---------------------------------------------------------------- models
-
-@Serializable
-data class BundleResponse(
-    val currentConditions: CurrentConditionsResponse = CurrentConditionsResponse(),
-    val forecastHours: ForecastHoursResponse = ForecastHoursResponse(),
-    val forecastDays: ForecastDaysResponse = ForecastDaysResponse(),
-    val historyHours: HistoryHoursResponse = HistoryHoursResponse(),
-    val publicAlerts: PublicAlertsResponse = PublicAlertsResponse(),
-)
-
-@Serializable
-data class LanguageInfo(
-    val code: String,
-    val nativeName: String,
-    val englishName: String,
-    val rtl: Boolean = false,
-)
-
-@Serializable
-data class LanguagesResponse(
-    val languages: List<LanguageInfo> = emptyList(),
-)
-
-@Serializable
-data class BriefingResponse(
-    val title: String = "",
-    val body: String = "",
-    val condition: String = "",
-    val highC: Double? = null,
-    val lowC: Double? = null,
-    val alertCount: Int = 0,
-    val language: String = "en",
-)
-
-@Serializable
-data class DeviceRegistrationRequest(
-    val deviceId: String,
-    val language: String,
-    val city: DeviceCityRequest,
-    val notificationTime: NotificationTimeRequest,
-    val units: String,
-    val alertsEnabled: Boolean = true,
-)
-
-@Serializable
-data class DeviceRegistrationResponse(
-    val deviceId: String = "",
-    val updatedAt: String = "",
-    /** Present only when the server issued (or rotated) a fresh secret. */
-    val deviceSecret: String? = null,
-)
-
-@Serializable
-data class DeviceCityRequest(
-    val id: String,
-    val name: String,
-    val latitude: Double,
-    val longitude: Double,
-    val timeZone: String? = null,
-)
-
-@Serializable
-data class NotificationTimeRequest(
-    val hour: Int,
-    val minute: Int,
-)

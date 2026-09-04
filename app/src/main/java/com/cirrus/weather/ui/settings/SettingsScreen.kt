@@ -17,12 +17,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,6 +49,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
@@ -58,6 +62,7 @@ import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -89,11 +94,11 @@ fun SettingsScreen(
     viewModel: SettingsViewModel,
     onBack: () -> Unit,
 ) {
-    val enabled by viewModel.enabled.collectAsState()
-    val language by viewModel.language.collectAsState()
-    val timeMinutes by viewModel.timeMinutes.collectAsState()
-    val languages by viewModel.languages.collectAsState()
-    val testSend by viewModel.testSend.collectAsState()
+    val enabled by viewModel.enabled.collectAsStateWithLifecycle()
+    val language by viewModel.language.collectAsStateWithLifecycle()
+    val timeMinutes by viewModel.timeMinutes.collectAsStateWithLifecycle()
+    val languages by viewModel.languages.collectAsStateWithLifecycle()
+    val testSend by viewModel.testSend.collectAsStateWithLifecycle()
 
     var showLanguagePicker by remember { mutableStateOf(false) }
     var showTimePicker by remember { mutableStateOf(false) }
@@ -416,7 +421,7 @@ private fun SettingRow(
 
 @Composable
 private fun LanguagePickerDialog(
-    languages: List<com.cirrus.weather.data.remote.LanguageInfo>,
+    languages: List<com.cirrus.weather.data.remote.dto.LanguageInfo>,
     selected: String,
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit,
@@ -539,21 +544,15 @@ private fun TimePickerDialog(
 private fun formatTime(minutes: Int): String {
     val hour = minutes / 60
     val minute = minutes % 60
-    return if (DateFormat.is24HourFormat(LocalContext.current)) {
-        String.format(Locale.US, "%d:%02d", hour, minute)
-    } else {
-        String.format(
-            Locale.US,
-            "%d:%02d %s",
-            if (hour % 12 == 0) 12 else hour % 12,
-            minute,
-            if (hour < 12) "AM" else "PM",
-        )
-    }
+    // Locale-aware pattern: "a" localizes the day period (a. m./p. m., 오전…)
+    // instead of hardcoding English AM/PM for every 12-hour locale.
+    val pattern = if (DateFormat.is24HourFormat(LocalContext.current)) "H:mm" else "h:mm a"
+    return java.time.format.DateTimeFormatter.ofPattern(pattern, Locale.getDefault())
+        .format(java.time.LocalTime.of(hour, minute))
 }
 
 private fun languageLabel(
-    languages: List<com.cirrus.weather.data.remote.LanguageInfo>,
+    languages: List<com.cirrus.weather.data.remote.dto.LanguageInfo>,
     code: String,
 ): String {
     val info = languages.firstOrNull { it.code == code }

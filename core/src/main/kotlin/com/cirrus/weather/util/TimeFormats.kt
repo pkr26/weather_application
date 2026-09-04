@@ -27,8 +27,10 @@ object TimeFormats {
         null
     }
 
-    fun zoneOf(zoneId: String?): ZoneId =
-        runCatching { ZoneId.of(zoneId ?: "UTC") }.getOrDefault(ZoneId.of("UTC"))
+    /** Invalid/unparseable zone ids fall back to UTC — callers pass a
+     *  non-null id (bundles and saved cities default theirs to "UTC"). */
+    fun zoneOf(zoneId: String): ZoneId =
+        runCatching { ZoneId.of(zoneId) }.getOrDefault(ZoneId.of("UTC"))
 
     fun hourAmPm(instant: Instant, zone: ZoneId): String =
         hourAmPm.format(instant.atZone(zone))

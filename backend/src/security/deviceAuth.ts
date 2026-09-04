@@ -18,7 +18,7 @@ const SECRET_BYTES = 32
 // Stryker disable StringLiteral: the pad's exact content is arbitrary by design — only its shape (a fixed SHA-256 digest / 32-byte hex) matters, and the encoding mutates to identical output (verified: update(s, '') ≡ update(s, 'utf8'))
 const DUMMY_HASH = hashDeviceSecret(`cirrus-timing-pad-${randomBytes(32).toString('hex')}`)
 const DUMMY_PRESENTED = randomBytes(SECRET_BYTES).toString('hex')
-// Stryker restore
+// Stryker restore StringLiteral
 
 export function generateDeviceSecret(): string {
   return randomBytes(SECRET_BYTES).toString('hex')
@@ -28,7 +28,7 @@ export function generateDeviceSecret(): string {
 export function hashDeviceSecret(secret: string): string {
   return createHash('sha256').update(secret, 'utf8').digest('hex')
 }
-// Stryker restore
+// Stryker restore StringLiteral
 
 /**
  * Constant-time comparison of a presented secret against a stored hash.
@@ -44,7 +44,7 @@ export function verifyDeviceSecret(presented: string | undefined, storedHash: st
     // the full compare; removing it cannot change any observable outcome.
     // Stryker disable CallExpression: timing-hygiene only — verified equivalent
     timingSafeEqual(presentedHash, presentedHash)
-    // Stryker restore
+    // Stryker restore CallExpression
     return false
   }
   return timingSafeEqual(presentedHash, stored)

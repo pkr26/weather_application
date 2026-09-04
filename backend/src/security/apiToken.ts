@@ -20,7 +20,7 @@ export function verifyApiToken(presented: string | undefined, expected: string):
     createHash('sha256').update(presented, 'utf8').digest(),
     createHash('sha256').update(expected, 'utf8').digest(),
   )
-  // Stryker restore
+  // Stryker restore StringLiteral
 }
 
 export function requireApiToken(token: string) {

@@ -1,10 +1,12 @@
 package com.cirrus.weather.ui.fx
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -25,14 +27,18 @@ fun AmbientBackground(
     modifier: Modifier = Modifier,
 ) {
     val reducedMotion = rememberReducedMotion()
-    val top by animateColorAsState(archetype.top, tween(1200), label = "gradTop")
-    val middle by animateColorAsState(archetype.middle, tween(1200), label = "gradMid")
-    val bottom by animateColorAsState(archetype.bottom, tween(1200), label = "gradBot")
+    val colorSpec = if (reducedMotion) snap<Color>() else tween<Color>(1200)
+    val top by animateColorAsState(archetype.top, colorSpec, label = "gradTop")
+    val middle by animateColorAsState(archetype.middle, colorSpec, label = "gradMid")
+    val bottom by animateColorAsState(archetype.bottom, colorSpec, label = "gradBot")
+    // The color list is hoisted: after the (optional) cross-fade settles,
+    // the draw phase allocates nothing per frame.
+    val gradientColors = remember(top, middle, bottom) { listOf(top, middle, bottom) }
 
     Canvas(modifier = modifier) {
         drawRect(
             brush = Brush.verticalGradient(
-                colors = listOf(top, middle, bottom),
+                colors = gradientColors,
                 startY = 0f,
                 endY = size.height,
             )

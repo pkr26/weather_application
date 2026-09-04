@@ -15,7 +15,10 @@ import java.io.File
  */
 class LastKnownWeatherStore(context: Context) {
 
-    private val dir = File(context.filesDir, "weather_cache").apply { mkdirs() }
+    // Lazy so construction (Application.onCreate, main thread) never does
+    // disk I/O — the directory is materialized on first use, which always
+    // happens on a caller-provided dispatcher.
+    private val dir by lazy { File(context.filesDir, "weather_cache").apply { mkdirs() } }
     private val json = Json { ignoreUnknownKeys = true }
 
     @Serializable
@@ -44,11 +47,34 @@ class LastKnownWeatherStore(context: Context) {
         }
     }
 
+    /**
+     * Drops every cached snapshot whose key starts with [keyPrefix] — a city
+     * id, whose coordinate-qualified variants all share the prefix. Deleting
+     * a city must not leave its snapshots orphaned on disk forever. Note the
+     * on-disk name sanitizes the "id@lat,lon" key's separators to "_", so
+     * the prefix match uses the sanitized separator.
+     */
+    fun removeAll(keyPrefix: String) {
+        val safe = sanitize(keyPrefix) ?: return
+        runCatching {
+            dir.listFiles()?.forEach { file ->
+                if (file.name.startsWith("${safe}_") || file.name == "$safe.json") {
+                    file.delete()
+                }
+            }
+        }
+    }
+
     private fun fileFor(key: String): File? {
-        // City ids are app-controlled ([a-z0-9_-]); guard anyway so a weird
-        // id can never escape the cache directory.
+        val safe = sanitize(key) ?: return null
+        return File(dir, "$safe.json")
+    }
+
+    // City ids are app-controlled ([a-z0-9_-]); guard anyway so a weird id
+    // can never escape the cache directory.
+    private fun sanitize(key: String): String? {
         val safe = key.replace(Regex("[^A-Za-z0-9._-]"), "_")
         if (safe.isEmpty() || safe == "." || safe == "..") return null
-        return File(dir, "$safe.json")
+        return safe
     }
 }

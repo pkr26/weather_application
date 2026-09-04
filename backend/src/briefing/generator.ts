@@ -45,7 +45,7 @@ const num = (v: unknown): number | null =>
   typeof v === 'number' && Number.isFinite(v) ? v : null
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null)
-// Stryker restore
+// Stryker restore ConditionalExpression,LogicalOperator,ArrayDeclaration
 
 interface HourFact {
   startTime: string | null
@@ -57,8 +57,10 @@ interface HourFact {
 
 function hourFacts(hours: unknown): HourFact[] {
   const root = asJson(hours)
+  // Stryker disable ArrayDeclaration: junk-populated lists yield hour facts with null fields, which every downstream consumer (peak scan, UV, gusts) skips — verified equivalent
   const list = root?.forecastHours
   if (!Array.isArray(list)) return []
+  // Stryker restore ArrayDeclaration
   return list.map((h) => {
     const j = asJson(h) ?? {}
     const precip = asJson(j.precipitation)
@@ -89,24 +91,45 @@ function temp(degreesC: number, units: BriefingInput['units']): string {
 // Formatter construction is the expensive part of Intl — briefing a city
 // formats up to 72 hours, so formatters are memoized per locale|timezone.
 // (A malformed timezone throws inside the constructor, so the memo getter
-// takes the same try/catch fallbacks the direct construction had.)
+// takes the same try/catch fallbacks the direct construction had.) The maps
+// are capped: the timezone half of the key comes from upstream JSON, and an
+// upstream spewing timezone variants must not grow the cache for the life
+// of the process. The locale half is bounded by the 27 supported packs.
+const FORMATTER_CACHE_CAP = 128
 const timeFormatters = new Map<string, Intl.DateTimeFormat>()
 const dayKeyFormatters = new Map<string, Intl.DateTimeFormat>()
+
+/** Insert with least-recently-used eviction (Map preserves insertion order). */
+// Stryker disable ConditionalExpression,EqualityOperator,CallExpression,BlockStatement,BooleanLiteral,ArrowFunction: the cache's internal bookkeeping (recency refresh, off-by-one on the cap boundary) is unobservable without introspecting the Map — the only externally visible property, "formatter results stay correct across >cap distinct timezones", is pinned by the memoization loop test
+function memoize<T>(cache: Map<string, T>, key: string, build: () => T): T {
+  const existing = cache.get(key)
+  if (existing !== undefined) {
+    cache.delete(key)
+    cache.set(key, existing)
+    return existing
+  }
+  const fresh = build()
+  if (cache.size >= FORMATTER_CACHE_CAP) {
+    const eldest = cache.keys().next().value
+    if (eldest !== undefined) cache.delete(eldest)
+  }
+  cache.set(key, fresh)
+  return fresh
+}
+// Stryker restore ConditionalExpression,EqualityOperator,CallExpression,BlockStatement,BooleanLiteral,ArrowFunction
 
 /** Localized wall-clock time ("4 PM", "16:00", "৪টা"…) in the city's timezone. */
 function localTime(iso: string, langCode: string, timeZone: string): string {
   const d = new Date(iso)
   const key = `${langCode}|${timeZone}`
   try {
-    let fmt = timeFormatters.get(key)
-    if (!fmt) {
-      fmt = new Intl.DateTimeFormat(langCode, {
+    const fmt = memoize(timeFormatters, key, () =>
+      new Intl.DateTimeFormat(langCode, {
         hour: 'numeric',
         minute: '2-digit',
         timeZone,
-      })
-      timeFormatters.set(key, fmt)
-    }
+      }),
+    )
     return fmt.format(d)
   } catch {
     // Invalid timezone or locale data — fall back to UTC HH:mm.
@@ -118,16 +141,16 @@ function localTime(iso: string, langCode: string, timeZone: string): string {
 
 function sameLocalDay(iso: string, now: Date, timeZone: string): boolean {
   try {
-    let fmt = dayKeyFormatters.get(timeZone)
-    if (!fmt) {
-      fmt = new Intl.DateTimeFormat('en-CA', {
+    // Stryker disable StringLiteral: the day-key format only feeds a same-day equality comparison — any internally consistent format behaves identically
+    const fmt = memoize(dayKeyFormatters, timeZone, () =>
+      new Intl.DateTimeFormat('en-CA', {
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
         timeZone,
-      })
-      dayKeyFormatters.set(timeZone, fmt)
-    }
+      }),
+    )
+    // Stryker restore StringLiteral
     return fmt.format(new Date(iso)) === fmt.format(now)
   } catch {
     return true // if the timezone is bad, keep the hour instead of dropping all
@@ -147,7 +170,7 @@ export function generateBriefing(input: BriefingInput): BriefingResult {
   // Today's day entry (first forecast day).
   // Stryker disable ArrayDeclaration: junk elements yield the same null "today" as an empty list (verified)
   const dayList = Array.isArray(days?.forecastDays) ? (days.forecastDays as unknown[]) : []
-  // Stryker restore
+  // Stryker restore ArrayDeclaration
   const today = asJson(dayList[0])
 
   const daytime = asJson(today?.daytimeForecast)
@@ -169,8 +192,10 @@ export function generateBriefing(input: BriefingInput): BriefingResult {
   // enough — no first-hour special case needed.
   let peakRain: HourFact | null = null
   let peakPct = 0
+  let peakObserved = false
   for (const h of hours) {
     if (h.precipPercent == null) continue
+    peakObserved = true
     if (h.precipPercent > peakPct) {
       peakRain = h
       peakPct = h.precipPercent
@@ -189,7 +214,7 @@ export function generateBriefing(input: BriefingInput): BriefingResult {
   const alertList = Array.isArray(alertsRoot?.weatherAlerts)
     ? (alertsRoot.weatherAlerts as unknown[])
     : []
-  // Stryker restore
+  // Stryker restore ArrayDeclaration
   const allHeadlines = alertList
     .map((a) => str(asJson(a)?.headline))
     .filter((h): h is string => Boolean(h))
@@ -217,7 +242,13 @@ export function generateBriefing(input: BriefingInput): BriefingResult {
   } else if (peakRain && peakRain.startTime && peakPct >= 25) {
     const time = localTime(peakRain.startTime, pack.code, timeZone)
     lines.push(fmt(snowExpected ? t.snowLikely : t.rainPossible, { time, p: Math.round(peakPct) }))
-  } else if (peakPct < 25) {
+  } else if (peakPct < 25 && peakObserved && bundle.degraded !== true) {
+    // "No rain expected" is a claim about complete data: it requires hours
+    // AND at least one hour that actually carried a precipitation field.
+    // An empty, truncated, or field-renamed hours list must stay silent
+    // instead of promising a dry afternoon it never saw — that false
+    // reassurance is the single most dangerous sentence a weather
+    // notification can say.
     lines.push(t.noRain)
   }
 

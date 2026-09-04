@@ -5,38 +5,70 @@ name: Release
 #  - the backend Docker image pushed to the registry (when configured)
 # Signing secrets (set in the repo): CIRRUS_KEYSTORE_BASE64,
 # CIRRUS_KEYSTORE_PASSWORD, CIRRUS_KEY_ALIAS, CIRRUS_KEY_PASSWORD.
+# Required repo VARIABLE (Settings → Secrets and variables → Actions →
+# Variables): RELEASE_API_BASE_URL — the production backend base URL the
+# bundle is built against (release builds refuse the emulator default).
+# A tag build WITHOUT the keystore secrets fails loudly instead of silently
+# publishing a debug-signed AAB.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version name for a manual build (without the v prefix)'
+        required: false
+        default: 'dev'
 
-permissions:
-  contents: write # create the release entry
+# Overlapping tag pushes must queue, not race — a half-published release is
+# worse than a slow one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   android:
     name: Android — signed AAB
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write # create the release entry
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      # Full history: VERSION_CODE derives from the commit count — a shallow
+      # tag checkout would yield a constant (and colliding) code.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@8379f6a1328ee0e06e2bb424dadb7b159856a326 # v4.4.0
       - name: Decode signing keystore
-        if: env.CIRRUS_KEYSTORE_BASE64 != ''
-        run: |
-          echo "${CIRRUS_KEYSTORE_BASE64}" | base64 --decode > "$RUNNER_TEMP/release.keystore"
-          echo "CIRRUS_KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
         env:
           CIRRUS_KEYSTORE_BASE64: ${{ secrets.CIRRUS_KEYSTORE_BASE64 }}
-      - name: Derive version from the tag
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          # A tag release must never silently fall back to debug signing.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ -z "${CIRRUS_KEYSTORE_BASE64}" ]; then
+            echo "::error::Release tag build is missing CIRRUS_KEYSTORE_BASE64 — refusing to publish a debug-signed AAB."
+            exit 1
+          fi
+          if [ -n "${CIRRUS_KEYSTORE_BASE64}" ]; then
+            echo "${CIRRUS_KEYSTORE_BASE64}" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+            echo "CIRRUS_KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          fi
+      - name: Derive version from the tag (or the manual input)
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          # Commit count + 100: monotonic per commit and permanently above
+          # any versionCode previously installed locally (the repo's first
+          # commit would otherwise produce versionCode 1).
           echo "VERSION_NAME=$VERSION" >> "$GITHUB_ENV"
-          echo "VERSION_CODE=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$(( $(git rev-list --count HEAD) + 100 ))" >> "$GITHUB_ENV"
       - name: Build release bundle
         run: >
           ./gradlew :app:bundleRelease
@@ -46,14 +78,15 @@ jobs:
           CIRRUS_KEYSTORE_PASSWORD: ${{ secrets.CIRRUS_KEYSTORE_PASSWORD }}
           CIRRUS_KEY_ALIAS: ${{ secrets.CIRRUS_KEY_ALIAS }}
           CIRRUS_KEY_PASSWORD: ${{ secrets.CIRRUS_KEY_PASSWORD }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cirrus-release-aab
           path: |
             app/build/outputs/bundle/release/app-release.aab
             app/build/outputs/mapping/release/mapping.txt
           retention-days: 30
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: app/build/outputs/bundle/release/app-release.aab
           generate_release_notes: true
@@ -62,14 +95,33 @@ jobs:
     name: Backend — Docker image
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # registry push (ghcr-style registries)
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Build image (push only when registry secrets exist)
-        uses: docker/build-push-action@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Registry login + image tags (only when a registry is configured)
+        env:
+          DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          if [ -z "${DOCKER_REGISTRY}" ]; then
+            echo "IMAGE_TAGS=cirrus-backend:local" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ -z "${DOCKER_USERNAME}" ]; then
+            echo "::error::DOCKER_REGISTRY is configured but DOCKER_USERNAME/DOCKER_PASSWORD secrets are missing — the push would fail 401."
+            exit 1
+          fi
+          echo "${DOCKER_PASSWORD}" | docker login "${DOCKER_REGISTRY}" --username "${DOCKER_USERNAME}" --password-stdin
+          echo "IMAGE_TAGS=${DOCKER_REGISTRY}/cirrus-backend:${GITHUB_REF_NAME},${DOCKER_REGISTRY}/cirrus-backend:latest" >> "$GITHUB_ENV"
+      - name: Build image (push only when a registry is configured)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: backend
           push: ${{ vars.DOCKER_REGISTRY != '' }}
-          tags: ${{ vars.DOCKER_REGISTRY != '' && format('{0}/cirrus-backend:latest', vars.DOCKER_REGISTRY) || 'cirrus-backend:local' }}
+          tags: ${{ env.IMAGE_TAGS }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

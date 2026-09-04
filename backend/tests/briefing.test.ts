@@ -14,6 +14,7 @@ function makeBundle(overrides: {
   highC?: number
   lowC?: number
   alerts?: Array<{ headline: string }>
+  timeZone?: string
 } = {}): WeatherBundle {
   const {
     conditionType = 'PARTLY_CLOUDY',
@@ -23,6 +24,7 @@ function makeBundle(overrides: {
     highC = 31,
     lowC = 24,
     alerts = [],
+    timeZone = 'Asia/Kolkata',
   } = overrides
 
   const day = '2026-09-03'
@@ -45,12 +47,12 @@ function makeBundle(overrides: {
 
   return {
     currentConditions: {
-      timeZone: { id: 'Asia/Kolkata' },
+      timeZone: { id: timeZone },
       weatherCondition: { type: conditionType },
       temperature: { unit: 'CELSIUS', degrees: 27 },
       isDaytime: true,
     },
-    forecastHours: { forecastHours: hours, timeZone: { id: 'Asia/Kolkata' } },
+    forecastHours: { forecastHours: hours, timeZone: { id: timeZone } },
     forecastDays: {
       forecastDays: [
         {
@@ -60,7 +62,7 @@ function makeBundle(overrides: {
           daytimeForecast: { weatherCondition: { type: conditionType } },
         },
       ],
-      timeZone: { id: 'Asia/Kolkata' },
+      timeZone: { id: timeZone },
     },
     historyHours: {},
     publicAlerts: { weatherAlerts: alerts },
@@ -256,7 +258,9 @@ describe('generateBriefing boundaries', () => {
       now: NOW,
     })
     expect(result.condition).toBe('Cloudy')
-    expect(result.body).toContain('No rain expected today')
+    // Null hours = missing data, not an absence of rain: the definitive
+    // no-rain claim must not be made on top of it.
+    expect(result.body).not.toContain('No rain expected today')
     expect(result.alertCount).toBe(0)
   })
 
@@ -457,16 +461,21 @@ describe('generateBriefing boundaries', () => {
     const notArray = makeBundle()
     ;(notArray.forecastHours as { forecastHours: unknown }).forecastHours = 'garbage'
     const degraded = generateBriefing({ bundle: notArray, city: 'T', pack: resolvePack('en'), units: 'metric', now: NOW })
-    expect(degraded.body).toContain('No rain expected today')
+    // An unparseable hours list is missing data, not a dry forecast.
+    expect(degraded.body).not.toContain('No rain expected today')
   })
 
-  it('says no rain when no hour carries a precipitation probability', () => {
+  it('stays silent on rain when NO hour carries a precipitation probability', () => {
+    // Absent precipitation data is not evidence of a dry day — hours
+    // without any probability field must not produce the confident claim.
     const bundle = makeBundle()
     for (const h of (bundle.forecastHours as { forecastHours: Array<{ precipitation: { probability: unknown } }> }).forecastHours) {
       delete h.precipitation.probability
     }
     const result = generateBriefing({ bundle, city: 'T', pack: resolvePack('en'), units: 'metric', now: NOW })
-    expect(result.body).toContain('No rain expected today')
+    expect(result.body).not.toContain('No rain expected today')
+    expect(result.body).not.toContain('rain likely')
+    expect(result.body).not.toContain('rain possible')
   })
 })
 
@@ -545,5 +554,61 @@ describe('generateBriefing — snow wording in the possible band', () => {
     }).format(new Date('2026-09-03T11:00:00Z'))
     expect(result.body).toContain(fmt(en.t.snowLikely, { time: expectedTime, p: 30 }))
     expect(result.body).not.toContain(en.t.rainPossible === undefined ? '\u0000' : fmt(en.t.rainPossible, { time: expectedTime, p: 30 }))
+  })
+})
+
+describe('formatter memoization', () => {
+  it('caps the per-locale|timezone formatter cache (upstream-controlled keys)', () => {
+    // The timezone half of the cache key comes from upstream JSON; without
+    // the cap a misbehaving upstream grows the map for the process lifetime.
+    const zones = Intl.supportedValuesOf('timeZone').slice(0, 140)
+    const bundleOf = (tz: string) =>
+      makeBundle({ precipAt: { hourUtc: 11, percent: 40 }, timeZone: tz })
+    for (const tz of zones) {
+      const result = generateBriefing({
+        bundle: bundleOf(tz),
+        city: 'T',
+        pack: resolvePack('en'),
+        units: 'metric',
+        now: NOW,
+      })
+      expect(result.body.length).toBeGreaterThan(0)
+    }
+    // A second pass over the same zones exercises the cache-HIT refresh
+    // path (delete+re-insert), not just insertions.
+    for (const tz of zones.slice(0, 20)) {
+      generateBriefing({
+        bundle: bundleOf(tz),
+        city: 'T',
+        pack: resolvePack('en'),
+        units: 'metric',
+        now: NOW,
+      })
+    }
+  })
+})
+
+describe('degraded flag at the generator boundary', () => {
+  it('a degraded bundle with perfectly normal hours still makes no rain claim', () => {
+    // Normal hours, low precip, but the bundle is flagged degraded (e.g.
+    // alerts-missing at the route layer): silence, not reassurance.
+    const bundle = makeBundle({ precipAt: { hourUtc: 11, percent: 5 } }) as WeatherBundle & { degraded?: boolean }
+    bundle.degraded = true
+    const result = generateBriefing({ bundle, city: 'T', pack: resolvePack('en'), units: 'metric', now: NOW })
+    expect(result.body).not.toContain('No rain expected today')
+    // Same bundle without the flag DOES claim it — proving the flag is the pivot.
+    const healthy = generateBriefing({
+      bundle: makeBundle({ precipAt: { hourUtc: 11, percent: 5 } }),
+      city: 'T', pack: resolvePack('en'), units: 'metric', now: NOW,
+    })
+    expect(healthy.body).toContain('No rain expected today')
+  })
+
+  it('very-hot advice fires at exactly 40°C', () => {
+    const at40 = generateBriefing({ bundle: makeBundle({ highC: 40, lowC: 24 }), city: 'T', pack: resolvePack('en'), units: 'metric', now: NOW })
+    const at39 = generateBriefing({ bundle: makeBundle({ highC: 39, lowC: 24 }), city: 'T', pack: resolvePack('en'), units: 'metric', now: NOW })
+    // The advice line is the ONLY difference between the two bodies.
+    expect(at40.body).not.toBe(at39.body)
+    expect(at40.body.length).toBeGreaterThan(at39.body.length)
   })
 })

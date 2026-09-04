@@ -1,15 +1,15 @@
 package com.cirrus.weather
 
-import com.cirrus.weather.data.remote.BriefingResponse
+import com.cirrus.weather.data.remote.dto.BriefingResponse
 import com.cirrus.weather.data.remote.CirrusApi
-import com.cirrus.weather.data.remote.DeviceRegistrationRequest
-import com.cirrus.weather.data.remote.DeviceRegistrationResponse
+import com.cirrus.weather.data.remote.dto.DeviceRegistrationRequest
+import com.cirrus.weather.data.remote.dto.DeviceRegistrationResponse
 import com.cirrus.weather.data.remote.GeocodingResponse
-import com.cirrus.weather.data.remote.LanguagesResponse
+import com.cirrus.weather.data.remote.dto.LanguagesResponse
 import com.cirrus.weather.data.remote.ReverseGeocodeResponse
 import com.cirrus.weather.data.remote.dto.CurrentConditionsResponse
 import com.cirrus.weather.data.remote.dto.PublicAlertsResponse
-import com.cirrus.weather.data.remote.BundleResponse
+import com.cirrus.weather.data.remote.dto.BundleResponse
 import com.cirrus.weather.domain.SavedCity
 import com.cirrus.weather.notify.DeviceIdentity
 import com.cirrus.weather.notify.DeviceRegistrar
@@ -74,8 +74,9 @@ private class FakeIdentity(var id: String = "device-0001", var stored: String? =
 
     override suspend fun secret(): String? = stored
 
-    override suspend fun storeSecret(secret: String) {
+    override suspend fun storeSecret(secret: String): Boolean {
         stored = secret
+        return true
     }
 
     override suspend fun reset() {

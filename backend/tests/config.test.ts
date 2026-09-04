@@ -153,3 +153,17 @@ describe('loadConfig', () => {
     expect(third.WEATHER_API_KEY).toBe('other')
   })
 })
+
+describe('cross-field validation', () => {
+  it('rejects a whole-request deadline that cannot fit even one attempt', () => {
+    resetConfigCache()
+    try {
+      loadConfig({ WEATHER_API_KEY: 'k', UPSTREAM_TIMEOUT_MS: '8000', UPSTREAM_DEADLINE_MS: '8000' } as NodeJS.ProcessEnv)
+      expect.unreachable('config must reject')
+    } catch (err) {
+      // The issue line names the FIELD on the path and the constraint in
+      // the message — both halves verbatim.
+      expect(String(err)).toMatch(/- UPSTREAM_DEADLINE_MS: UPSTREAM_DEADLINE_MS must exceed UPSTREAM_TIMEOUT_MS/)
+    }
+  })
+})

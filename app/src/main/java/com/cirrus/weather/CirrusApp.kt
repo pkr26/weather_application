@@ -21,12 +21,16 @@ class CirrusApp : Application() {
 
         // Keep notification schedules aligned with persisted preferences and
         // sync the device registry with the backend. Both are idempotent.
+        // bootReschedule (not a plain REPLACE) so a briefing that was still
+        // pending-and-offline when the process started is caught up today
+        // instead of silently skipped to tomorrow.
         container.applicationScope.launch {
             try {
                 if (container.settings.notificationsEnabled.first()) {
-                    NotificationScheduler.scheduleDailyBriefing(
+                    NotificationScheduler.bootReschedule(
                         this@CirrusApp,
                         container.settings.notificationTimeMinutes.first(),
+                        container.settings.lastBriefingPostedAt.first(),
                     )
                     NotificationScheduler.scheduleAlertPolling(this@CirrusApp)
                 }

@@ -1,10 +1,10 @@
 package com.cirrus.weather.notify
 
 import com.cirrus.weather.data.remote.CirrusApi
-import com.cirrus.weather.data.remote.DeviceCityRequest
-import com.cirrus.weather.data.remote.DeviceRegistrationRequest
-import com.cirrus.weather.data.remote.DeviceRegistrationResponse
-import com.cirrus.weather.data.remote.NotificationTimeRequest
+import com.cirrus.weather.data.remote.dto.DeviceCityRequest
+import com.cirrus.weather.data.remote.dto.DeviceRegistrationRequest
+import com.cirrus.weather.data.remote.dto.DeviceRegistrationResponse
+import com.cirrus.weather.data.remote.dto.NotificationTimeRequest
 import com.cirrus.weather.domain.SavedCity
 import kotlinx.coroutines.CancellationException
 import retrofit2.HttpException
@@ -21,8 +21,8 @@ interface DeviceIdentity {
     /** The stored secret, or null when none has been issued yet. */
     suspend fun secret(): String?
 
-    /** Persists a freshly issued secret. */
-    suspend fun storeSecret(secret: String)
+    /** Persists a freshly issued secret. @return false when not persisted. */
+    suspend fun storeSecret(secret: String): Boolean
 
     /** Forgets id and secret — used when the server no longer knows us. */
     suspend fun reset()
@@ -41,7 +41,7 @@ interface DeviceIdentity {
 class DeviceRegistrar(
     private val identity: DeviceIdentity,
     private val api: CirrusApi,
-    private val activeCity: suspend () -> SavedCity,
+    private val activeCity: suspend () -> SavedCity?,
     private val settings: RegistrationSettings,
 ) {
 
@@ -77,8 +77,10 @@ class DeviceRegistrar(
         }
     }
 
-    private suspend fun doRegister(): DeviceRegistrationResponse {
-        val city = activeCity()
+    private suspend fun doRegister(): DeviceRegistrationResponse? {
+        // No cities (the user deleted everything): nothing to register the
+        // device against — a made-up default city must not be advertised.
+        val city = activeCity() ?: return null
         val time = settings.notificationTimeMinutes()
         val response = api.registerDevice(
             DeviceRegistrationRequest(

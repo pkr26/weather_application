@@ -46,7 +46,7 @@ and Gemini).
     searchable language picker, and **"Send test notification"** to preview
     immediately in the chosen language.
 
-### Backend — `backend/` (Node.js 20+, TypeScript, Express)
+### Backend — `backend/` (Node.js 22+, TypeScript, Express)
 
 - Single API surface for the app (`/api/v1`) — the Google Weather API key
   lives only in `backend/.env`, never in the APK. Publicly-reachable
@@ -75,8 +75,8 @@ and Gemini).
   redaction in logs, clean JSON error envelope, graceful shutdown, Dockerfile.
   See [SECURITY.md](SECURITY.md) for the full threat model and
   control-to-test matrix.
-- **292 tests** plus **mutation testing (StrykerJS — 98% gate on scored
-  mutants, with ~35% documented equivalent-mutant ignores)** and a
+- **483 tests** (per-file coverage gated at 98%) plus **mutation testing
+  (StrykerJS — the build breaks below 98% of scored mutants)** and a
   zero-finding `npm audit` — see [TESTING.md](TESTING.md).
 
 ## Run the whole system
@@ -85,7 +85,7 @@ and Gemini).
 
    ```bash
    cd backend
-   cp .env.example .env        # set WEATHER_API_KEY (or reuse local.properties' demo key)
+   cp .env.example .env        # set WEATHER_API_KEY (see "API key" below)
    npm install && npm run dev  # serves http://localhost:8080
    ```
 
@@ -112,29 +112,29 @@ and Gemini).
 
 ## API key
 
-`backend/.env` holds the credential (`local.properties` only points the app at the backend URL). The repo ships with
-**Google's public Maps demo key** (rate-limited, evaluation only). For real
-use, create a key in [Google Cloud Console](https://console.cloud.google.com)
-(enable the Weather API) and put it in `backend/.env` — the Android app needs
-no key at all anymore.
+`backend/.env` holds the credential (`local.properties` only points the app
+at the backend URL). Create your own key in
+[Google Cloud Console](https://console.cloud.google.com) (enable the Weather
+API) and put it in `backend/.env` — the Android app needs no key at all.
 
 ## Testing & quality gates
 
 ```bash
-# Backend (Node 20+)
+# Backend (Node 22+)
 cd backend
-npm test            # 275 tests: API surface, security, upstream resilience,
-                    # briefing engine (27 languages), cache, store, config
+npm test            # 483 tests: API surface, security, upstream resilience,
+                    # briefing engine (27 languages), cache, store, config,
+                    # log content, graceful-shutdown integration
 npm run typecheck
-npm run mutation    # StrykerJS mutation testing — 86% mutation score,
-                    # build breaks below 75%
+npm run test:coverage  # per-file 98% lines/branches/functions/statements gate
+npm run mutation    # StrykerJS mutation testing — build breaks below 98%
 npm run audit       # dependency audit — 0 findings
 
 # Android
 ./gradlew :core:test              # pure domain logic (units, time, scheduling)
-./gradlew :core:pitest            # PIT mutation testing — 83% score,
-                                  # breaks below 80%
+./gradlew :core:pitest            # PIT mutation testing — gate at 98%
 ./gradlew :app:testDebugUnitTest  # app logic (spline, themes, view model,
+                                  # notification use cases, mappers, registrar,
                                   # alert dedupe keys)
 ./gradlew assembleDebug           # full APK
 ```
@@ -142,8 +142,8 @@ npm run audit       # dependency audit — 0 findings
 Details, including what mutation testing found and how accuracy is protected
 (timezone math, single-source unit conversion, freshness headers):
 [TESTING.md](TESTING.md). Threat model and the security-control-to-test
-matrix: [SECURITY.md](SECURITY.md). CI runs all of the above on every push
-(`.github/workflows/ci.yml`).
+matrix: [SECURITY.md](SECURITY.md). CI runs all of the above on every push to
+main and on every pull request (`.github/workflows/ci.yml`).
 
 ## Project layout
 
@@ -151,7 +151,7 @@ matrix: [SECURITY.md](SECURITY.md). CI runs all of the above on every push
 backend/                 Node.js + TypeScript service (see backend/README.md)
 core/                    Pure Kotlin JVM module: unit conversions, domain
                          models, time formatting, briefing scheduling math —
-                         mutation-tested with PIT (83% score)
+                         mutation-tested with PIT (98% gate)
 app/src/main/java/com/cirrus/weather/
   data/remote/           CirrusApi (backend client), DTOs, geocoding models
   data/local/            DataStore: cities, units + notification prefs
@@ -176,6 +176,8 @@ app/src/main/java/com/cirrus/weather/
   for physical-device testing.
 - Weather data is informational and is **not** an official severe-weather
   warning source — always defer to local authorities (alerts come from the
-  API's `publicAlerts` endpoint, re-checked every 4 hours).
+  API's `publicAlerts` endpoint, re-checked every 2 hours).
 - Deployment: `backend/Dockerfile` (+ `/app/data` volume for the device
-  registry); serve the APK via any standard Android distribution.
+  registry); serve the APK via any standard Android distribution. Tag-driven
+  releases additionally need the `RELEASE_API_BASE_URL` repo variable (the
+  production backend URL) plus the four `CIRRUS_KEYSTORE_*` secrets.

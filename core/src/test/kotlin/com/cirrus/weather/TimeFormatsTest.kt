@@ -34,8 +34,7 @@ class TimeFormatsTest {
     }
 
     @Test
-    fun `falls back to UTC for missing or invalid zones`() {
-        assertEquals(ZoneId.of("UTC"), TimeFormats.zoneOf(null))
+    fun `falls back to UTC for invalid zones`() {
         assertEquals(ZoneId.of("UTC"), TimeFormats.zoneOf(""))
         assertEquals(ZoneId.of("UTC"), TimeFormats.zoneOf("Not/AZone"))
         assertEquals(kolkata, TimeFormats.zoneOf("Asia/Kolkata"))
@@ -47,6 +46,15 @@ class TimeFormatsTest {
         assertEquals("5 PM", TimeFormats.hourAmPm(t, ZoneId.of("UTC")))
         assertEquals("23:00", TimeFormats.hourMinute(t, kolkata))
         assertEquals("11 PM", TimeFormats.hourAmPm(t, kolkata))
+    }
+
+    @Test
+    fun `hour labels follow the 12 or 24 hour clock preference`() {
+        val t = Instant.parse("2026-09-03T17:30:00Z") // 23:00 in Kolkata
+        assertEquals("23:00", TimeFormats.hourLabel(t, kolkata, clock24 = true))
+        assertEquals("11 PM", TimeFormats.hourLabel(t, kolkata, clock24 = false))
+        assertEquals("23:00", TimeFormats.hourMinute(t, kolkata, clock24 = true))
+        assertEquals("11:00 PM", TimeFormats.hourMinute(t, kolkata, clock24 = false))
     }
 
     @Test

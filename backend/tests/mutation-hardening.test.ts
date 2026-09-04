@@ -470,11 +470,11 @@ describe('GoogleWeatherClient request shapes', () => {
 
   it('does not retry permanent 4xx answers — one attempt', async () => {
     const fetchMock = vi.fn(async () =>
-      ({ ok: false, status: 429, json: async () => ({}), text: async () => 'quota' }) as Response,
+      ({ ok: false, status: 403, json: async () => ({}), text: async () => 'forbidden' }) as Response,
     )
     vi.stubGlobal('fetch', fetchMock)
     const client = new GoogleWeatherClient(makeConfig({ UPSTREAM_RETRIES: '3' }))
-    await expect(client.currentConditions(coord)).rejects.toThrow('Weather API v1/currentConditions:lookup failed: 429')
+    await expect(client.currentConditions(coord)).rejects.toThrow('Weather API v1/currentConditions:lookup failed: 403')
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
@@ -570,7 +570,9 @@ describe('briefing hostile-number edges', () => {
     }
     const result = generateBriefing({ bundle, city: 'T', pack: resolvePack('en'), units: 'metric', now: NOW })
     expect(result.body).not.toContain('Infinity')
-    expect(result.body).toContain('No rain expected today')
+    // A lone, unusable probability datum is not evidence of a dry day —
+    // the briefing stays silent on precipitation entirely.
+    expect(result.body).not.toContain('No rain expected today')
   })
 
   it('keeps same-day hours when the timezone is invalid — late-day rain survives', () => {
@@ -716,9 +718,10 @@ describe('briefing composition edges', () => {
       units: 'metric',
       now: NOW,
     })
-    // No crash, defaults everywhere.
+    // No crash, defaults everywhere — and no false "no rain" claim on top
+    // of an empty (garbage-typed) hours list.
     expect(result.condition).toBeTruthy()
     expect(result.alertCount).toBe(0)
-    expect(result.body).toContain('No rain expected today')
+    expect(result.body).not.toContain('No rain expected today')
   })
 })

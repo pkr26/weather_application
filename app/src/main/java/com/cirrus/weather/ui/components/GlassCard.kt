@@ -15,10 +15,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 
 /** The card silhouette — shared by every glass card, allocated once. */
 private val CardShape = RoundedCornerShape(24.dp)
+
+/** The sheen falloff — allocation-free per composition. */
+private val SheenColors = listOf(
+    Color.White.copy(alpha = 0.07f),
+    Color.Transparent,
+)
 
 /**
  * Apple Weather-style translucent card: a soft white gradient fill (brighter
@@ -47,19 +54,20 @@ fun GlassCard(
             )
     ) {
         // Diagonal light streak across the top corner — the "glass" cue.
+        // End point is density-scaled so the streak keeps its shape on
+        // every screen instead of shrinking on high-density displays.
+        val density = LocalDensity.current
+        val sheenEnd = with(density) { androidx.compose.ui.geometry.Offset(225.dp.toPx(), 75.dp.toPx()) }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(72.dp)
-                .clip(shape)
+                .clip(CardShape)
                 .background(
                     Brush.linearGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.07f),
-                            Color.Transparent,
-                        ),
+                        colors = SheenColors,
                         start = androidx.compose.ui.geometry.Offset(0f, 0f),
-                        end = androidx.compose.ui.geometry.Offset(600f, 200f),
+                        end = sheenEnd,
                     )
                 )
         )

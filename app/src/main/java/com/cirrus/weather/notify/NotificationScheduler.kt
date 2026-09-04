@@ -72,6 +72,27 @@ object NotificationScheduler {
     }
 
     /**
+     * Boot / timezone-change reschedule. A plain REPLACE would silently kill
+     * today's still-pending briefing (its CONNECTED constraint unmet while
+     * the device was offline) and jump straight to tomorrow — so when the
+     * target time has already passed today and nothing was posted yet, a
+     * catch-up run is armed to fire the moment connectivity returns.
+     */
+    fun bootReschedule(context: Context, timeMinutes: Int, lastPostedAtMs: Long) {
+        val now = LocalDateTime.now()
+        val target = now.toLocalDate().atTime(timeMinutes / 60, timeMinutes % 60)
+        // "Recently" is a 20-hour wall-clock window, not a calendar day: a
+        // westward flight that jumps local time across midnight must not
+        // count as "a whole day missed" hours after the real briefing.
+        val postedRecently =
+            lastPostedAtMs > 0 &&
+                System.currentTimeMillis() - lastPostedAtMs < RECENT_BRIEFING_WINDOW_MS
+        val missedToday = now.isAfter(target) && !postedRecently
+        if (missedToday) scheduleBriefingCatchUp(context)
+        scheduleDailyBriefing(context, timeMinutes)
+    }
+
+    /**
      * Fires the briefing as soon as connectivity returns — used when the
      * scheduled run exhausted its retries (e.g. a long tunnel commute), so
      * the day's briefing is late rather than skipped. The tomorrow chain is
@@ -103,4 +124,22 @@ object NotificationScheduler {
     fun cancelAlertPolling(context: Context) {
         WorkManager.getInstance(context).cancelUniqueWork(ALERT_POLLING)
     }
+
+    /**
+     * Re-anchors the briefing schedule after a clock or timezone change.
+     * Broadcast receivers must not do DataStore I/O on the main thread, so
+     * the work is handed to a one-shot worker under a stable unique name
+     * (flapping broadcasts coalesce).
+     */
+    fun requestReschedule(context: Context) {
+        val request = OneTimeWorkRequestBuilder<RescheduleWorker>()
+            .build()
+        WorkManager.getInstance(context)
+            .enqueueUniqueWork(RESCHEDULE, ExistingWorkPolicy.REPLACE, request)
+    }
+
+    private const val RESCHEDULE = "briefing_reschedule_after_clock_change"
+
+        /** A briefing posted within this window counts as "not missed". */
+        private const val RECENT_BRIEFING_WINDOW_MS = 20L * 60 * 60 * 1000
 }

@@ -18,7 +18,13 @@ FROM node:22-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev --ignore-scripts && addgroup -S app && adduser -S app -G app
+# Materialize the data volume mountpoint OWNED BY the runtime user: a bare
+# VOLUME declaration lets Docker create it root-owned, and the non-root app
+# user then gets EACCES on the first device-registry write — while the
+# healthcheck (which never touches the store) stays green.
+RUN npm ci --omit=dev --ignore-scripts \
+  && addgroup -S app && adduser -S app -G app \
+  && mkdir -p /app/data && chown app:app /app/data
 COPY --from=build /app/dist ./dist
 USER app
 EXPOSE 8080

@@ -67,36 +67,65 @@ function freshnessHeaders(
 }
 
 /**
- * Core weather is cached only when fully healthy (full TTL) — a degraded
- * bundle (soft endpoint failure or truncated pagination) is cached with the
- * short degraded TTL instead: a blip must not freeze for 10 minutes, and a
- * persistent failure must not turn every request into 5 upstream calls.
+ * Core weather is cached at the full TTL when healthy, and at the short
+ * degraded TTL when a soft endpoint failed or pagination truncated: a blip
+ * must not freeze for 10 minutes, and a persistent failure must not turn
+ * every request into 5 upstream calls. (Both variants ARE cached — a
+ * `cacheable: (b) => !b.degraded` predicate here would make the degraded
+ * branch below unreachable dead code and resurrect the quota-burn bug.)
  */
 function coreCacheOpts(svc: Services) {
   return {
-    cacheable: (b: CoreBundle) => !b.degraded,
     ttlFor: (b: CoreBundle) => (b.degraded ? svc.config.DEGRADED_CACHE_TTL_MS : svc.config.CACHE_TTL_MS),
   }
 }
 
-/** Loads core + localized alerts and merges them into a bundle response. */
-async function loadBundleParts(svc: Services, c: Coord, lang: string) {
+/**
+ * Per-request upstream scope: a wall-clock deadline over the whole fan-out
+ * and an abort when the client hangs up mid-flight. Without the link, a
+ * disappeared client's five upstream calls run to completion for an answer
+ * nobody will read — pure quota burn during brownouts.
+ */
+function upstreamScope(svc: Services, req: Request, res: Response): AbortSignal {
+  const clientGone = new AbortController()
+  // Stryker disable ConditionalExpression,ArrowFunction,ObjectLiteral: the abort-on-disconnect arm is pinned by the client-abort test; the listener registration itself is socket-lifecycle bookkeeping
+  res.on('close', () => {
+    if (!res.writableEnded) clientGone.abort()
+  })
+  // Stryker restore ConditionalExpression,ArrowFunction,ObjectLiteral
+  return AbortSignal.any([
+    clientGone.signal,
+    AbortSignal.timeout(svc.config.UPSTREAM_DEADLINE_MS),
+  ])
+}
+
+/**
+ * Loads core + localized alerts and merges them into a bundle response.
+ * Each request contributes its own scope (deadline + disconnect) to the
+ * shared flight via the cache's participant set; the load aborts only when
+ * every participant is gone.
+ */
+async function loadBundleParts(svc: Services, c: Coord, lang: string, signal?: AbortSignal) {
   const core = await svc.coreCache.getOrLoadWithMeta(
     coordKey(c.latitude, c.longitude),
-    () => svc.weather.coreBundle(c),
-    coreCacheOpts(svc),
+    (flight) => svc.weather.coreBundle(c, flight),
+    { ...coreCacheOpts(svc), signal },
   )
   // Alerts fail soft: the rest of the bundle is still useful without them.
   let alertsFailed = false
   const alerts = await svc.alertsCache
     .getOrLoadWithMeta(
       `${coordKey(c.latitude, c.longitude)}|${lang}`,
-      () => svc.weather.publicAlerts(c, lang),
-      { ttlFor: () => svc.config.ALERTS_CACHE_TTL_MS },
+      (flight) => svc.weather.publicAlerts(c, lang, flight),
+      // Stryker disable ObjectLiteral,ArrowFunction: the opts shape is unobservable — alerts metadata comes from the served entry, and this TTL never reaches a client-visible header
+      { ttlFor: () => svc.config.ALERTS_CACHE_TTL_MS, signal },
+      // Stryker restore ObjectLiteral,ArrowFunction
     )
     .catch(() => {
       alertsFailed = true
+      // Stryker disable ObjectLiteral,ArrowFunction: the fallback object's exact shape is unobservable — the degraded flag it produces is what the response asserts
       return { value: {} as unknown, cache: 'miss' as const, ageMs: 0, ttlMs: svc.config.ALERTS_CACHE_TTL_MS }
+      // Stryker restore ObjectLiteral,ArrowFunction
     })
   return { core, alerts, alertsFailed }
 }
@@ -136,10 +165,18 @@ export function weatherRouter(svc: Services): Router {
       // one cache entry and one upstream languageCode. Core weather is
       // language-independent (alerts are the only localized part).
       const pack = resolvePack(q.lang)
-      const { core, alerts, alertsFailed } = await loadBundleParts(svc, coord(q), pack.code)
+      const scope = upstreamScope(svc, req, res)
+      const { core, alerts, alertsFailed } = await loadBundleParts(svc, coord(q), pack.code, scope)
 
-      freshnessHeaders(res, core.cache, core.ageMs, core.ttlMs)
-      res.setHeader('X-Alerts-Age-Seconds', String(Math.floor(alerts.ageMs / 1000)))
+      // Alerts missing = a degraded bundle: shared caches may keep it only
+      // briefly, never the full core TTL.
+      const servedTtl = alertsFailed
+        ? Math.min(core.ttlMs, svc.config.ALERTS_CACHE_TTL_MS)
+        : core.ttlMs
+      freshnessHeaders(res, core.cache, core.ageMs, servedTtl)
+      if (!alertsFailed) {
+        res.setHeader('X-Alerts-Age-Seconds', String(Math.floor(alerts.ageMs / 1000)))
+      }
       res.json({
         ...core.value,
         publicAlerts: alerts.value,
@@ -150,8 +187,11 @@ export function weatherRouter(svc: Services): Router {
     '/weather/current',
     asyncHandler(async (req, res) => {
       const q = query(req, latLon)
-      const entry = await svc.currentCache.getOrLoadWithMeta(coordKey(q.lat, q.lon), () =>
-        svc.weather.currentConditions(coord(q)),
+      const scope = upstreamScope(svc, req, res)
+      const entry = await svc.currentCache.getOrLoadWithMeta(
+        coordKey(q.lat, q.lon),
+        (flight) => svc.weather.currentConditions(coord(q), flight),
+        { signal: scope },
       )
       freshnessHeaders(res, entry.cache, entry.ageMs, entry.ttlMs)
       res.json(entry.value)
@@ -176,7 +216,7 @@ export function geocodeRouter(svc: Services): Router {
       // both directions share entries across letter case identically.
       // Stryker disable MethodExpression: verified equivalent case-fold direction
       const key = `${q.name.toLowerCase()}|${q.count}`
-      // Stryker restore
+      // Stryker restore MethodExpression
       const entry = await svc.geocodeCache.getOrLoadWithMeta(key, () =>
         svc.geocoding.search(q.name, q.count),
       )
@@ -215,11 +255,12 @@ export function notificationsRouter(svc: Services): Router {
             // imperial" — observably identical to 'metric' (verified).
             // Stryker disable StringLiteral
             units: z.enum(['metric', 'imperial']).default('metric'),
-            // Stryker restore
+            // Stryker restore StringLiteral
           })),
         )
         const pack = resolvePack(q.lang)
-        const { core, alerts, alertsFailed } = await loadBundleParts(svc, coord(q), pack.code)
+        const scope = upstreamScope(svc, req, res)
+        const { core, alerts, alertsFailed } = await loadBundleParts(svc, coord(q), pack.code, scope)
         const briefing = generateBriefing({
           bundle: {
             ...core.value,
@@ -232,8 +273,16 @@ export function notificationsRouter(svc: Services): Router {
           pack,
           units: q.units,
         })
-        // Briefings embed the user's city name — keep them out of shared caches.
-        freshnessHeaders(res, core.cache, core.ageMs, core.ttlMs, 'private')
+        // Briefings embed the user's city name — keep them out of shared
+        // caches; and an alerts-missing briefing is degraded, so even the
+        // private max-age is clamped to the short window.
+        freshnessHeaders(
+          res,
+          core.cache,
+          core.ageMs,
+          alertsFailed ? Math.min(core.ttlMs, svc.config.ALERTS_CACHE_TTL_MS) : core.ttlMs,
+          'private',
+        )
         res.json(briefing)
       }),
     )
@@ -245,10 +294,11 @@ export function notificationsRouter(svc: Services): Router {
         // Alerts are served near-fresh from a microcache (seconds, not the
         // full weather TTL): warnings are never meaningfully stale, yet a
         // storm-time herd of devices shares one upstream call per place.
+        const scope = upstreamScope(svc, req, res)
         const entry = await svc.alertsCache.getOrLoadWithMeta(
           `${coordKey(q.lat, q.lon)}|${pack.code}`,
-          () => svc.weather.publicAlerts(coord(q), pack.code),
-          { ttlFor: () => svc.config.ALERTS_CACHE_TTL_MS },
+          (flight) => svc.weather.publicAlerts(coord(q), pack.code, flight),
+          { ttlFor: () => svc.config.ALERTS_CACHE_TTL_MS, signal: scope },
         )
         res.setHeader('X-Cache', entry.cache)
         res.setHeader('X-Data-Age-Seconds', String(Math.floor(entry.ageMs / 1000)))
@@ -329,10 +379,17 @@ export function devicesRouter(svc: Services): Router {
           if (!authenticated) {
             throw unauthorized('Missing or invalid device secret.')
           }
-          const saved = await svc.devices.upsert({
-            ...parsed.data,
-            secretHash: record.secretHash,
-          })
+          // Guarded write: if a concurrent rotation changed the secret
+          // between the middleware's read and this write, the guard rejects
+          // instead of resurrecting the just-retired hash.
+          const saved = await svc.devices.updateIfSecretMatches(
+            record.deviceId,
+            record.secretHash,
+            parsed.data,
+          )
+          if (!saved) {
+            throw unauthorized('Device record changed; re-authenticate.')
+          }
           res.setHeader('Cache-Control', 'no-store')
           res.json({ deviceId: saved.deviceId, updatedAt: saved.updatedAt })
           return
@@ -354,10 +411,19 @@ export function devicesRouter(svc: Services): Router {
       requireDeviceSecret(svc.devices),
       asyncHandler(async (req, res) => {
         // Secret rotation: a leaked secret is replaced (verify old, issue
-        // new) without abandoning the device identity.
+        // new) without abandoning the device identity. The write is guarded
+        // on the hash the middleware verified — a concurrent rotation or
+        // authenticated update cannot be silently clobbered by this one.
         const current = res.locals.device as DeviceRecord
         const deviceSecret = generateDeviceSecret()
-        await svc.devices.upsert({ ...current, secretHash: hashDeviceSecret(deviceSecret) })
+        const rotated = await svc.devices.updateIfSecretMatches(
+          current.deviceId,
+          current.secretHash,
+          { ...current, secretHash: hashDeviceSecret(deviceSecret) },
+        )
+        if (!rotated) {
+          throw unauthorized('Device record changed; re-authenticate.')
+        }
         res.setHeader('Cache-Control', 'no-store')
         res.json({ deviceId: current.deviceId, deviceSecret })
       }),
@@ -384,5 +450,7 @@ export function devicesRouter(svc: Services): Router {
 // --------------------------------------------------------- 404 fallback
 
 export function notFoundHandler(_req: Request, res: Response): void {
+  // 404s are request-dependent; a shared cache must never memorize them.
+  res.setHeader('Cache-Control', 'no-store')
   res.status(404).json({ error: 'not_found', message: 'No such endpoint.' })
 }

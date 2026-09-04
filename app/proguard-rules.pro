@@ -15,4 +15,14 @@
 -dontwarn com.google.errorprone.**
 -dontwarn com.google.api.client.**
 -dontwarn org.joda.time.**
--keep class com.google.crypto.tink.** { *; }
+# Tink is loaded reflectively by security-crypto: keep its registry-facing
+# entry points, but let R8 strip the wide algorithm surface we never touch
+# (the previous blanket `-keep class com.google.crypto.tink.** { *; }`
+# defeated shrinking for the entire library).
+-keep class com.google.crypto.tink.integration.android.** { *; }
+-keep class * implements com.google.crypto.tink.KeyManager { *; }
+-keep class com.google.crypto.tink.KeyTemplate { *; }
+-keepclassmembers class com.google.crypto.tink.** {
+    public static *** registerKeyManager(...);
+    public static *** register(...);
+}

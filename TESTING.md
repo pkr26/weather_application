@@ -4,17 +4,17 @@ Three layers, each answering a different question:
 
 | Layer | Question it answers | Tool | Status |
 |-------|--------------------|------|--------|
-| **Unit & integration tests** | Does the code do what it should? | Vitest (backend, **292 tests**), JUnit4 (Android `core` + app, **65 tests**) | all green |
+| **Unit & integration tests** | Does the code do what it should? | Vitest (backend, **483 tests**), JUnit4 (Android `core` + app, **91 tests**) | all green |
 | **Per-file coverage gate** | Did the suite forget a file? | Vitest + istanbul, **98% lines/branches/functions/statements per file** | enforced in CI (`npm run test:coverage`) |
-| **Mutation testing** | Do the tests actually *catch* bugs — would they fail if the logic were broken? | StrykerJS (backend, **99%+ score, break at 98**), PIT (Kotlin core, **99%+ score, thresholds at 98**) | enforced in CI |
+| **Mutation testing** | Do the tests actually *catch* bugs — would they fail if the logic were broken? | StrykerJS (backend, **last full run: 99.1%, break below 98**), PIT (Kotlin core, **last full run: 100%, thresholds at 98**) | enforced in CI |
 | **Dependency audit** | Do we ship known-vulnerable code? | `npm audit` (gate in CI) | 0 findings |
 
 > Mutation testing is the honest meter of test quality: it flips operators,
 > boundaries, and constants in the production code (`>=` → `>`, `50` → `51`,
 > `&&` → `||`, `return x` → `return null`, …) and counts how many of those
 > deliberately broken builds make a test fail. A suite that passes every
-> test but only catches 60% of mutants is a suite that lies. Ours catches
-> 99%+ on both sides — the survivors that remain are individually analysed:
+> test but only catches 60% of mutants is a suite that lies. Both sides gate
+> at 98% — the survivors that remain are individually analysed:
 > each is either a provably equivalent mutant (documented with a
 > `// Stryker disable` reason at the site) or a kill verified by hand where
 > the sandbox's crash detection miscounts.
@@ -23,7 +23,7 @@ Three layers, each answering a different question:
 
 ```bash
 cd backend
-npm test            # 292 tests
+npm test            # 483 tests
 npm run test:coverage  # same tests + per-file 98% coverage gate
 npm run typecheck   # tsc --noEmit
 npm run mutation    # Stryker — breaks below 98
@@ -50,12 +50,21 @@ What is covered:
   body, all 27 language packs (key + placeholder completeness).
 - **Cache** (`cache.test.ts`) — TTL expiry (incl. exact boundary), LRU-ish
   eviction order, stampede collapse (one load for concurrent requests),
-  failed loads not cached.
+  failed loads not cached, single-flight waiters receive the leader's
+  per-value TTL (degraded entries never advertise a full-TTL max-age).
 - **Device store** (`devicestore.test.ts`) — disk round-trip, corrupted-file
-  recovery, wrong-version rejection, disk-write failure survival, secrets
-  persisted but never exposed through `publicDevice`.
+  quarantine, wrong-version rejection, disk-write failure survival, transient
+  I/O errors failing instead of wiping the registry, hash-guarded updates
+  (rotation-race protection), secrets persisted but never exposed through
+  `publicDevice`.
 - **Config & errors** (`config.test.ts`, `errors.test.ts`) — every enum and
-  range, issue formatting, error envelope mapping incl. body-parser 4xx.
+  range, issue formatting, error envelope mapping incl. body-parser 4xx,
+  upstream 429/503 → 503 with `Retry-After` forwarded.
+- **Logging** (`logging.test.ts`) — redaction paths, the PII-free request
+  serializer AND the actual pino-http wiring (serializers attached, response
+  headers never logged, device ids collapsed out of paths).
+- **Graceful shutdown** (`shutdown.test.ts`) — boots the real `index.ts`
+  process, asserts SIGTERM drains and exits 0.
 
 Stryker configuration: `backend/stryker.config.json` — mutates all `src/**`
 except `index.ts` (bootstrap), `logger.ts` (pino configuration only) and the
@@ -64,10 +73,11 @@ translation packs (data, not logic). Reports: `backend/reports/mutation/`.
 ## Android (`core/` + `app/`, Kotlin)
 
 ```bash
-./gradlew :core:test            # 29 tests over the pure domain module
-./gradlew :core:pitest          # PIT — 98% mutation threshold enforced (last report: 99.2%)
-./gradlew :app:testDebugUnitTest  # 36 tests over app logic (spline, themes,
-                                  #                                  view model, alert keys)
+./gradlew :core:test            # 30 tests over the pure domain module
+./gradlew :core:pitest          # PIT — 98% mutation threshold enforced
+./gradlew :app:testDebugUnitTest  # 61 tests over app logic (spline, themes,
+                                  # view model + lifecycle, notification use
+                                  # cases, mappers, registrar, alert keys)
 ./gradlew assembleDebug         # full APK build
 ```
 
@@ -93,6 +103,6 @@ with boundary tests (sub-10 formatting, rounding, nulls, both unit systems).
   fallback for invalid zone data.
 - Freshness: weather responses carry `X-Data-Age-Seconds` + `Cache-Control`
   aligned to the server TTL; severe-weather alerts are **never** cached
-  (`X-Cache: bypass`, `no-store`).
+  (near-fresh microcache server-side, always `no-store` to clients).
 - The briefing day-window ("today") is computed in the *city's* local day,
   not the server's — mutation-tested against tomorrow-outlier hours.

@@ -136,7 +136,10 @@ fun ForecastDaysResponse.toDayUis(): List<DayUi> =
 fun PublicAlertsResponse.toAlertUis(): List<AlertUi> =
     weatherAlerts.map { alert ->
         AlertUi(
-            headline = alert.headline ?: alert.alertType?.replace('_', ' ') ?: "Weather Alert",
+            // Typed event as stand-in when no headline arrived; blank only
+            // when the upstream sent neither — the banner localizes that
+            // last resort instead of hardcoding English here.
+            headline = alert.headline ?: alert.alertType?.replace('_', ' ') ?: "",
             description = alert.description?.text ?: "",
             severity = alert.severity ?: "",
             startsAt = TimeFormats.parseUtc(alert.eventStartTime),

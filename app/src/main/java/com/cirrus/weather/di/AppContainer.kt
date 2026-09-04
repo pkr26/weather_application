@@ -9,6 +9,7 @@ import com.cirrus.weather.data.repo.WeatherRepository
 import com.cirrus.weather.notify.AlertUseCase
 import com.cirrus.weather.notify.BriefingUseCase
 import com.cirrus.weather.notify.DeviceRegistrar
+import com.cirrus.weather.notify.Notifier
 import com.cirrus.weather.notify.activeCity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -88,6 +89,20 @@ class AppContainer(context: Context) {
     )
 
     /** Notification work, extracted from the workers so the flow is readable. */
-    val briefingUseCase = BriefingUseCase(cirrusApi, settings) { activeCity() }
-    val alertUseCase = AlertUseCase(cirrusApi, settings) { activeCity() }
+    val briefingUseCase = BriefingUseCase(
+        api = cirrusApi,
+        prefs = settings,
+        activeCity = { activeCity() },
+        showBriefing = { title, body, cityId ->
+            Notifier.showBriefing(appContext, title, body, cityId)
+        },
+    )
+    val alertUseCase = AlertUseCase(
+        api = cirrusApi,
+        prefs = settings,
+        activeCity = { activeCity() },
+        showAlert = { notificationId, headline, description, cityId ->
+            Notifier.showAlert(appContext, notificationId, headline, description, cityId)
+        },
+    )
 }

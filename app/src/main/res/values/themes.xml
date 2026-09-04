@@ -2,8 +2,9 @@
 <resources>
     <style name="Theme.Cirrus" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@android:color/black</item>
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- No statusBarColor/navigationBarColor: deprecated and ignored when
+             targeting SDK 36 (edge-to-edge is enforced there — the app calls
+             enableEdgeToEdge() and applies all insets itself). -->
         <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

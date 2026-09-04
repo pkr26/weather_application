@@ -160,7 +160,7 @@ describe('TtlCache', () => {
   it('getOrLoadWithMeta marks hits and misses', async () => {
     const cache = new TtlCache<number>(100_000)
     const miss = await cache.getOrLoadWithMeta('k', async () => 1)
-    expect(miss).toEqual({ value: 1, cache: 'miss', ageMs: 0 })
+    expect(miss).toEqual({ value: 1, cache: 'miss', ageMs: 0, ttlMs: 100_000 })
     const hit = await cache.getOrLoadWithMeta('k', async () => 2)
     expect(hit.cache).toBe('hit')
     expect(hit.value).toBe(1)
@@ -198,5 +198,108 @@ describe('coordKey', () => {
   it('rounds coordinates to two decimals so nearby devices share entries', () => {
     expect(coordKey(10.111, 20.222)).toBe('10.11,20.22')
     expect(coordKey(10.113, 20.224)).toBe(coordKey(10.111, 20.222))
+  })
+})
+
+describe('single-flight scope and TTL', () => {
+  it("waiters receive the leader's per-value TTL, not the constructor TTL", async () => {
+    const cache = new TtlCache<{ degraded: boolean }>(600_000)
+    const loader = async () => ({ degraded: true })
+    const opts = { ttlFor: (v: { degraded: boolean }) => (v.degraded ? 5_000 : 600_000) }
+    const [a, b] = await Promise.all([
+      cache.getOrLoadWithMeta('k', loader, opts),
+      cache.getOrLoadWithMeta('k', loader, opts),
+    ])
+    expect(a.ttlMs).toBe(5_000)
+    expect(b.ttlMs).toBe(5_000) // the lie this pins: 600_000 before the fix
+  })
+
+  it('one hung-up participant does not abort the shared load for the others', async () => {
+    const cache = new TtlCache<number>(600_000)
+    const leaderScope = new AbortController()
+    const waiterScope = new AbortController()
+    let release: ((v: number) => void) | undefined
+    const load = (signal: AbortSignal) =>
+      new Promise<number>((resolve, reject) => {
+        release = resolve
+        signal.addEventListener('abort', () => reject(new Error('flight aborted')))
+      })
+    const leader = cache.getOrLoadWithMeta('k', load, { signal: leaderScope.signal })
+    const waiter = cache.getOrLoadWithMeta('k', load, { signal: waiterScope.signal })
+    // Let both registrations settle synchronously.
+    await Promise.resolve()
+    leaderScope.abort() // the leader's client hung up mid-flight
+    release!(42) // …but the shared load completes for EVERYONE on it
+    // The waiter gets its answer (this is the poisoning fix) — and the
+    // leader's promise settles too: its response simply goes to a dead
+    // socket, which is harmless; only all-participants-gone aborts the load.
+    await expect(waiter).resolves.toMatchObject({ value: 42, cache: 'miss' })
+    await expect(leader).resolves.toMatchObject({ value: 42, cache: 'miss' })
+  })
+
+  it('the flight aborts when the LAST participant leaves', async () => {
+    const cache = new TtlCache<number>(600_000)
+    const a = new AbortController()
+    const b = new AbortController()
+    let flightSignal: AbortSignal | undefined
+    const load = (signal: AbortSignal) => {
+      flightSignal = signal
+      return new Promise<number>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('all gone')))
+      })
+    }
+    const leader = cache.getOrLoadWithMeta('k', load, { signal: a.signal })
+    const waiter = cache.getOrLoadWithMeta('k', load, { signal: b.signal })
+    await Promise.resolve()
+    a.abort()
+    expect(flightSignal?.aborted).toBe(false) // the waiter keeps the flight alive
+    b.abort()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(flightSignal?.aborted).toBe(true) // last one out turns off the lights
+    // A late joiner after the flight died is a no-op (must not resurrect it).
+    const latecomer = new AbortController()
+    // Rejoin through a fresh cache entry sharing the same scope is not
+    // reachable — instead assert the guard directly via the public surface:
+    // a second getOrLoad on the aborted key starts a NEW flight, unaffected.
+    const second = cache.getOrLoadWithMeta('k', (sig) => Promise.resolve(7), { signal: latecomer.signal })
+    await expect(second).resolves.toMatchObject({ value: 7 })
+    void leader.catch(() => {})
+    void waiter.catch(() => {})
+  })
+})
+
+describe('SharedScope direct semantics', () => {
+  it('a late joiner onto an aborted flight is a no-op', async () => {
+    const { SharedScope } = await import('../src/cache.js')
+    const scope = new SharedScope()
+    const first = new AbortController()
+    scope.join(first.signal)
+    let settled: unknown
+    scope.signal.addEventListener('abort', () => {
+      // Join AFTER the composite died — must not resurrect it.
+      const late = new AbortController()
+      scope.join(late.signal)
+      settled = scope.signal.aborted
+      late.abort()
+    })
+    first.abort()
+    await Promise.resolve()
+    expect(scope.signal.aborted).toBe(true) // still dead after the late join+abort
+    expect(settled).toBe(true)
+  })
+
+  it('an already-aborted participant never joins', async () => {
+    const { SharedScope } = await import('../src/cache.js')
+    const scope = new SharedScope()
+    const dead = new AbortController()
+    dead.abort()
+    scope.join(dead.signal) // no-op: must not arm the abort-on-empty
+    const alive = new AbortController()
+    scope.join(alive.signal)
+    alive.abort()
+    // The dead signal did not count as a participant, so aborting the only
+    // live one still kills the flight.
+    expect(scope.signal.aborted).toBe(true)
   })
 })

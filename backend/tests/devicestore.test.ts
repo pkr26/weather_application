@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync, chmodSync } from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -120,7 +120,7 @@ describe('DeviceStore', () => {
     const reopened = new DeviceStore(dataDir)
     await reopened.get('device-12345678')
     expect(warn).toHaveBeenCalledOnce()
-    expect(warn.mock.calls[0][1]).toBe('Device store unreadable, starting fresh')
+    expect(warn.mock.calls[0][1]).toBe('Device store corrupt — quarantined, starting fresh')
     warn.mockRestore()
   })
 
@@ -286,5 +286,99 @@ describe('DeviceStore', () => {
     const record = await new DeviceStore(dataDir).get('device-legacyfcm')
     expect(record).toBeTruthy()
     expect(record).not.toHaveProperty('fcmToken')
+  })
+})
+
+describe('DeviceStore.updateIfSecretMatches', () => {
+  it('applies the update while the hash still matches and preserves an omitted secret', async () => {
+    const dataDir = dir('guarded-ok')
+    const store = new DeviceStore(dataDir)
+    const created = await store.createIfAbsent({ ...sampleRecord(), secretHash: 'h1' })
+    expect(created.created).toBe(true)
+
+    const saved = await store.updateIfSecretMatches('device-12345678', 'h1', sampleRecord())
+    expect(saved).not.toBeNull()
+    // No secretHash in the update → the stored hash survives untouched.
+    expect(saved!.secretHash).toBe('h1')
+    expect((await store.get('device-12345678'))!.secretHash).toBe('h1')
+  })
+
+  it('rejects the write when the stored hash moved on (rotation race guard)', async () => {
+    const dataDir = dir('guarded-moved')
+    const store = new DeviceStore(dataDir)
+    await store.createIfAbsent({ ...sampleRecord(), secretHash: 'h1' })
+    // A concurrent rotation already replaced h1 with h2.
+    await store.updateIfSecretMatches('device-12345678', 'h1', {
+      ...sampleRecord(),
+      secretHash: 'h2',
+    })
+    expect(await store.updateIfSecretMatches('device-12345678', 'h1', sampleRecord())).toBeNull()
+    // The stale writer must not have resurrected h1.
+    expect((await store.get('device-12345678'))!.secretHash).toBe('h2')
+  })
+
+  it('rejects writes for missing devices and reserved keys', async () => {
+    const store = new DeviceStore(dir('guarded-missing'))
+    expect(await store.updateIfSecretMatches('nobody-123456', 'h', sampleRecord())).toBeNull()
+    expect(await store.updateIfSecretMatches('__proto__', 'h', sampleRecord())).toBeNull()
+  })
+})
+
+describe('DeviceStore transient I/O errors', () => {
+  it('fails the call instead of wiping the registry on an unreadable file', async () => {
+    const dataDir = dir('ioerror')
+    const store = new DeviceStore(dataDir)
+    await store.upsert(sampleRecord())
+    // Break read permission on the persisted file (EACCES ≠ ENOENT ≠ corrupt).
+    const file = path.join(dataDir, 'devices.json')
+    chmodSync(file, 0o000)
+
+    const reopened = new DeviceStore(dataDir)
+    await expect(reopened.get('device-12345678')).rejects.toBeInstanceOf(Error)
+    // A later write through the original handle must not have destroyed the
+    // data — the failed reader never marked itself loaded.
+    chmodSync(file, 0o644)
+    expect(readFileSync(file, 'utf8')).toContain('device-12345678')
+  })
+})
+
+describe('reserved identifiers and the size cap on createIfAbsent', () => {
+  it('createIfAbsent refuses reserved identifiers with an error', async () => {
+    const store = new DeviceStore(dir('create-reserved'))
+    await expect(store.createIfAbsent({ ...sampleRecord('__proto__') })).rejects.toThrow('Reserved device id')
+  })
+
+  it('createIfAbsent refuses new records once the cap is reached', async () => {
+    const store = new DeviceStore(dir('create-cap'), 2, 365 * 24 * 60 * 60 * 1000)
+    await store.createIfAbsent(sampleRecord('device-aaaaaaaaaa'))
+    await store.createIfAbsent(sampleRecord('device-bbbbbbbbbb'))
+    // The registry is full: a NEW identity is refused…
+    await expect(store.createIfAbsent(sampleRecord('device-cccccccccc'))).rejects.toBeInstanceOf(RegistryFullError)
+    // …but an existing one still updates in place via the guarded path.
+    const updated = await store.updateIfSecretMatches('device-aaaaaaaaaa', undefined, sampleRecord('device-aaaaaaaaaa'))
+    expect(updated).not.toBeNull()
+  })
+
+  it('upsert refuses reserved identifiers too', async () => {
+    const store = new DeviceStore(dir('upsert-reserved'))
+    await expect(store.upsert({ ...sampleRecord('constructor') })).rejects.toThrow('Reserved device id')
+  })
+})
+
+describe('corrupt-file quarantine when the directory is read-only', () => {
+  it('still starts fresh when renaming the corrupt file away fails', async () => {
+    const dataDir = dir('quarantine-fail')
+    const store = new DeviceStore(dataDir)
+    await store.upsert(sampleRecord())
+    writeFileSync(path.join(dataDir, 'devices.json'), '~~garbage~~')
+    // Directory without write permission: the quarantine rename now fails,
+    // the catch must swallow it, and the store still comes up empty.
+    chmodSync(dataDir, 0o555)
+    try {
+      const reopened = new DeviceStore(dataDir)
+      expect(await reopened.get('device-12345678')).toBeNull()
+    } finally {
+      chmodSync(dataDir, 0o755)
+    }
   })
 })

@@ -140,7 +140,7 @@ class CityListViewModel(
                     val lon = r.longitude ?: return@mapNotNull null
                     val name = r.name ?: return@mapNotNull null
                     SearchedPlace(
-                        id = r.id ?: "$lat,$lon",
+                        id = r.id?.toString() ?: "$lat,$lon",
                         name = name,
                         admin1 = r.admin1 ?: "",
                         country = r.country ?: "",
@@ -200,6 +200,9 @@ class CityListViewModel(
                     settings.setActiveCity(remaining.firstOrNull()?.id ?: "")
                 }
             }
+            // Snapshots of a deleted city are dead weight — evict every
+            // coordinate variant so add/delete churn never bloats the cache.
+            weatherRepository.clearCityCache(city.id)
         }
     }
 

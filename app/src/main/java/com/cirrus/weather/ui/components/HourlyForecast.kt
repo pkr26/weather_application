@@ -9,6 +9,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -23,11 +24,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -50,7 +51,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.platform.HapticFeedbackType
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -130,6 +131,7 @@ fun HourlyForecastCard(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxWidth()
+                .minimumInteractiveComponentSize()
                 .clickable(role = Role.Button) {
                     hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                     expandedFor = enterKey to !expanded
@@ -211,34 +213,43 @@ private fun HourStrip(
         Row(
             modifier = Modifier
                 .horizontalScroll(scrollState)
-                .drawWithContent {
-                    drawContent()
+                // The fade brushes live in the draw CACHE: gradient
+                // coordinates are absolute in the DrawScope space, so the
+                // right-edge brush must span [width-fade, width] — built
+                // here where size is known, allocated once per size change,
+                // never per scroll frame.
+                .drawWithCache {
                     val fade = 22.dp.toPx()
-                    if (canScrollBack) {
-                        drawRect(
-                            brush = Brush.horizontalGradient(
-                                0f to Color.Transparent,
-                                1f to Color.Black,
-                                startX = 0f,
-                                endX = fade,
-                            ),
-                            topLeft = Offset.Zero,
-                            size = size.copy(width = fade),
-                            blendMode = BlendMode.DstIn,
-                        )
-                    }
-                    if (canScrollForward) {
-                        drawRect(
-                            brush = Brush.horizontalGradient(
-                                0f to Color.Black,
-                                1f to Color.Transparent,
-                                startX = size.width - fade,
-                                endX = size.width,
-                            ),
-                            topLeft = Offset(size.width - fade, 0f),
-                            size = size.copy(width = fade),
-                            blendMode = BlendMode.DstIn,
-                        )
+                    val fadeIn = Brush.horizontalGradient(
+                        0f to Color.Transparent,
+                        1f to Color.Black,
+                        startX = 0f,
+                        endX = fade,
+                    )
+                    val fadeOut = Brush.horizontalGradient(
+                        0f to Color.Black,
+                        1f to Color.Transparent,
+                        startX = size.width - fade,
+                        endX = size.width,
+                    )
+                    onDrawWithContent {
+                        drawContent()
+                        if (canScrollBack) {
+                            drawRect(
+                                brush = fadeIn,
+                                topLeft = Offset.Zero,
+                                size = size.copy(width = fade),
+                                blendMode = BlendMode.DstIn,
+                            )
+                        }
+                        if (canScrollForward) {
+                            drawRect(
+                                brush = fadeOut,
+                                topLeft = Offset(size.width - fade, 0f),
+                                size = size.copy(width = fade),
+                                blendMode = BlendMode.DstIn,
+                            )
+                        }
                     }
                 },
         ) {
@@ -406,6 +417,11 @@ private fun CurveOverlay(columns: List<HourColumn>, reveal: Animatable<Float, An
             .semantics { contentDescription = curveDescription }
             .drawWithCache {
                 val n = columns.size
+                // A single-hour bundle must not reach Spline (it requires
+                // two points); render nothing rather than crash.
+                if (n < 2) {
+                    return@drawWithCache onDrawBehind { }
+                }
                 val colPx = COLUMN_WIDTH.toPx()
                 val xs = FloatArray(n) { it * colPx + colPx / 2f }
                 val usableTop = HEADER_STACK.toPx() + CURVE_PAD_TOP.toPx()
@@ -446,7 +462,6 @@ private fun CurveOverlay(columns: List<HourColumn>, reveal: Animatable<Float, An
                     join = StrokeJoin.Round,
                 )
                 onDrawBehind {
-                    if (columns.size < 2) return@onDrawBehind
                     // The sweep reveals curve, fill and dot together; read in
                     // the draw phase so only it invalidates per frame.
                     val r = reveal.value.coerceIn(0f, 1f)

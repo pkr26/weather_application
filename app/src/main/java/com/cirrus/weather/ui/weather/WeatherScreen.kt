@@ -18,7 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.minimumInteractiveComponentSize
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -53,6 +53,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -188,8 +189,10 @@ private fun AdaptiveStatusBar(lightBackground: Boolean) {
         val window = (view.context as? Activity)?.window
         val controller = window?.let { WindowCompat.getInsetsController(it, view) }
         // No-ops outside an activity (previews) — the cast is deliberately null-safe.
+        // Restore the *previous* appearance on dispose, not its opposite.
+        val previous = controller?.isAppearanceLightStatusBars
         controller?.isAppearanceLightStatusBars = lightBackground
-        onDispose { controller?.isAppearanceLightStatusBars = !lightBackground }
+        onDispose { if (previous != null) controller?.isAppearanceLightStatusBars = previous }
     }
 }
 
@@ -403,6 +406,7 @@ private fun CircleIconButton(icon: ImageVector, label: String, onClick: () -> Un
 
 @Composable
 private fun RefreshPill(refreshing: Boolean, onRefresh: () -> Unit) {
+    val refreshLabel = stringResource(R.string.refresh_cd)
     Box(
         modifier = Modifier
             .minimumInteractiveComponentSize()
@@ -410,7 +414,12 @@ private fun RefreshPill(refreshing: Boolean, onRefresh: () -> Unit) {
             .clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.18f), CircleShape)
             .clickable(enabled = !refreshing, onClick = onRefresh)
-            .semantics { role = Role.Button },
+            .semantics {
+                role = Role.Button
+                // The spinner replaces the icon: keep announcing the control
+                // so it does not vanish from the accessibility tree mid-refresh.
+                contentDescription = refreshLabel
+            },
         contentAlignment = Alignment.Center,
     ) {
         if (refreshing) {
@@ -420,7 +429,7 @@ private fun RefreshPill(refreshing: Boolean, onRefresh: () -> Unit) {
                 modifier = Modifier.size(18.dp),
             )
         } else {
-            Icon(Icons.Rounded.Refresh, contentDescription = stringResource(R.string.refresh_cd), tint = Color.White)
+            Icon(Icons.Rounded.Refresh, contentDescription = null, tint = Color.White)
         }
     }
 }

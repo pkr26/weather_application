@@ -25,6 +25,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -36,9 +37,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.platform.HapticFeedbackType
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -117,42 +119,48 @@ fun DailyForecastCard(
         Column(modifier = Modifier.animateContentSize()) {
             val hapticFeedback = LocalHapticFeedback.current
             shownDays.forEachIndexed { index, day ->
-                // Expansion state survives the row scrolling out of the lazy
-                // list, but resets when a different city's forecast takes over
-                // the slot: the saved value carries the key it belongs to.
-                var expandedFor by rememberSaveable {
-                    mutableStateOf<Pair<Any?, Boolean>?>(null)
+                // Keyed by date: if the forecast list shifts or truncates on
+                // refresh, each row's saved expansion state follows its day
+                // instead of migrating to whatever now occupies the index.
+                key(day.dateEpochDay) {
+                    // Expansion state survives the row scrolling out of the
+                    // lazy list, but resets when a different city's forecast
+                    // takes over the slot: the saved value carries the key it
+                    // belongs to.
+                    var expandedFor by rememberSaveable {
+                        mutableStateOf<Pair<Any?, Boolean>?>(null)
+                    }
+                    val savedExpansion = expandedFor
+                    val expanded = savedExpansion != null &&
+                        savedExpansion.first == enterKey &&
+                        savedExpansion.second
+                    val label = when (day.dateEpochDay) {
+                        todayEpoch -> stringResource(R.string.today)
+                        todayEpoch + 1 -> stringResource(R.string.tomorrow)
+                        else -> weekdayLabel(day.dateEpochDay)
+                    }
+                    DayRow(
+                        day = day,
+                        isToday = day.dateEpochDay == todayEpoch,
+                        // Date-based, matching isToday — index-based labels would
+                        // call a stale first row "Today" after local midnight.
+                        label = label,
+                        globalMin = globalMin,
+                        globalMax = globalMax,
+                        currentTempC = if (day.dateEpochDay == todayEpoch) currentTempC else null,
+                        unitPref = unitPref,
+                        timeZone = timeZone,
+                        expanded = expanded,
+                        expandedState = expandedState,
+                        collapsedState = collapsedState,
+                        onToggle = {
+                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                            expandedFor = enterKey to !expanded
+                        },
+                        barDelayMs = 420 + index * 55,
+                        enterKey = enterKey,
+                    )
                 }
-                val savedExpansion = expandedFor
-                val expanded = savedExpansion != null &&
-                    savedExpansion.first == enterKey &&
-                    savedExpansion.second
-                val label = when (day.dateEpochDay) {
-                    todayEpoch -> stringResource(R.string.today)
-                    todayEpoch + 1 -> stringResource(R.string.tomorrow)
-                    else -> weekdayLabel(day.dateEpochDay)
-                }
-                DayRow(
-                    day = day,
-                    isToday = day.dateEpochDay == todayEpoch,
-                    // Date-based, matching isToday — index-based labels would
-                    // call a stale first row "Today" after local midnight.
-                    label = label,
-                    globalMin = globalMin,
-                    globalMax = globalMax,
-                    currentTempC = if (day.dateEpochDay == todayEpoch) currentTempC else null,
-                    unitPref = unitPref,
-                    timeZone = timeZone,
-                    expanded = expanded,
-                    expandedState = expandedState,
-                    collapsedState = collapsedState,
-                    onToggle = {
-                        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                        expandedFor = enterKey to !expanded
-                    },
-                    barDelayMs = 420 + index * 55,
-                    enterKey = enterKey,
-                )
             }
         }
     }
@@ -196,8 +204,9 @@ private fun DayRow(
                 .fillMaxWidth()
                 // Grows with text at accessibility font scales instead of
                 // vertically clipping — same graceful-degradation policy as
-                // the hourly strip's fixed geometry.
-                .heightIn(min = 46.dp),
+                // the hourly strip's fixed geometry. 48dp keeps the whole
+                // row at the Material touch-target minimum.
+                .heightIn(min = 48.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -296,59 +305,73 @@ private fun RangeBar(
         delayMs = delayMs.toLong(),
         durationMs = 650,
     )
-    Canvas(modifier = modifier.height(6.dp).padding(horizontal = 4.dp)) {
-        val p = progress.value
-        val w = size.width
-        val h = size.height
-        val startFraction = (((day.minTempC ?: globalMin) - globalMin) / span)
-            .toFloat().coerceIn(0f, 1f)
-        val endFraction = (((day.maxTempC ?: globalMax) - globalMin) / span)
-            .toFloat().coerceIn(0f, 1f)
-        val barTop = Offset(0f, h / 2f - 3.dp.toPx() / 2f)
-
-        // Track
-        drawRoundRect(
-            color = Color.White.copy(alpha = 0.18f),
-            topLeft = barTop,
-            size = Size(w, 3.dp.toPx().coerceAtMost(h)),
-            cornerRadius = CornerRadius(999f),
+    // Gradient endpoints are stable per day — computed once in composition,
+    // never per draw frame (the entrance sweep re-draws every row ~40×).
+    val gradientColors = remember(day.minTempC, day.maxTempC, globalMin, globalMax) {
+        listOf(
+            tempColor(day.minTempC ?: globalMin),
+            tempColor(day.maxTempC ?: globalMax),
         )
-        // Gradient fill between this day's min and max, growing on entrance
-        val x0 = startFraction * w
-        val x1Full = (endFraction * w).coerceAtLeast(x0 + 2f)
-        val x1 = x0 + (x1Full - x0) * p
-        if (x1 - x0 > 1f) {
-            drawRoundRect(
-                brush = Brush.horizontalGradient(
-                    colors = listOf(
-                        tempColor(day.minTempC ?: globalMin),
-                        tempColor(day.maxTempC ?: globalMax),
-                    ),
-                    startX = x0,
-                    endX = x1Full,
-                ),
-                topLeft = Offset(x0, barTop.y),
-                size = Size(x1 - x0, 3.dp.toPx().coerceAtMost(h)),
-                cornerRadius = CornerRadius(999f),
-            )
-        }
-        // Current temperature dot on today's bar
-        if (currentTempC != null) {
-            val cxFinal = (((currentTempC - globalMin) / span).toFloat() * w)
-                .coerceIn(0f, w)
-            val cx = x0 + (cxFinal - x0) * p
-            drawCircle(
-                color = Color.White.copy(alpha = p),
-                radius = h * 0.82f,
-                center = Offset(cx, h / 2f),
-            )
-            drawCircle(
-                color = tempColor(currentTempC).copy(alpha = p),
-                radius = h * 0.52f,
-                center = Offset(cx, h / 2f),
-            )
-        }
     }
+    Spacer(
+        modifier = modifier
+            .height(6.dp)
+            .padding(horizontal = 4.dp)
+            .drawWithCache {
+                val w = size.width
+                val h = size.height
+                val trackHeight = 3.dp.toPx().coerceAtMost(h)
+                val barTop = Offset(0f, h / 2f - trackHeight / 2f)
+                val corner = CornerRadius(999f)
+                val startFraction = (((day.minTempC ?: globalMin) - globalMin) / span)
+                    .toFloat().coerceIn(0f, 1f)
+                val endFraction = (((day.maxTempC ?: globalMax) - globalMin) / span)
+                    .toFloat().coerceIn(0f, 1f)
+                val x0 = startFraction * w
+                val x1Full = (endFraction * w).coerceAtLeast(x0 + 2f)
+                val gradient =
+                    if (x1Full - x0 > 1f) Brush.horizontalGradient(gradientColors, x0, x1Full)
+                    else null
+                val dotX = currentTempC?.let {
+                    (((it - globalMin) / span).toFloat() * w).coerceIn(0f, w)
+                }
+                onDrawBehind {
+                    // Track
+                    drawRoundRect(
+                        color = Color.White.copy(alpha = 0.18f),
+                        topLeft = barTop,
+                        size = Size(w, trackHeight),
+                        cornerRadius = corner,
+                    )
+                    val p = progress.value
+                    // Gradient fill between this day's min and max, growing
+                    // on entrance.
+                    val x1 = x0 + (x1Full - x0) * p
+                    if (gradient != null && x1 - x0 > 1f) {
+                        drawRoundRect(
+                            brush = gradient,
+                            topLeft = Offset(x0, barTop.y),
+                            size = Size(x1 - x0, trackHeight),
+                            cornerRadius = corner,
+                        )
+                    }
+                    // Current temperature dot on today's bar
+                    if (dotX != null) {
+                        val cx = x0 + (dotX - x0) * p
+                        drawCircle(
+                            color = Color.White.copy(alpha = p),
+                            radius = h * 0.82f,
+                            center = Offset(cx, h / 2f),
+                        )
+                        drawCircle(
+                            color = tempColor(currentTempC!!).copy(alpha = p),
+                            radius = h * 0.52f,
+                            center = Offset(cx, h / 2f),
+                        )
+                    }
+                }
+            },
+    )
 }
 
 @Composable
@@ -393,10 +416,10 @@ private fun DetailLine(label: String, value: String) {
 }
 
 private fun weekdayLabel(epochDay: Long): String {
-    val date = LocalDate.ofEpochDay(epochDay)
-    return date.dayOfWeek.name.lowercase().let {
-        it.replaceFirstChar { c -> c.uppercase() }.take(3)
-    }
+    // Locale-aware short weekday ("Mon"/"lun."/"सोम") — the screen's other
+    // copy is backend-localized, so English day names would stick out.
+    return java.time.format.DateTimeFormatter.ofPattern("EEE", java.util.Locale.getDefault())
+        .format(LocalDate.ofEpochDay(epochDay))
 }
 
 /** Apple's cold-to-hot gradient stops — hoisted: this lookup runs twice per

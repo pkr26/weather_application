@@ -1,14 +1,23 @@
 package com.cirrus.weather.ui.components
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -21,8 +30,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -35,24 +48,20 @@ import com.cirrus.weather.ui.theme.CirrusPalette
 import com.cirrus.weather.ui.theme.rememberClock24
 import com.cirrus.weather.util.TimeFormats
 import java.time.ZoneId
-import androidx.compose.animation.animateContentSize
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.platform.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 
 /**
  * Severe weather warning banner. Tint follows severity; tap to expand the
- * full description.
+ * full description. Announced politely by TalkBack when it appears.
  */
 @Composable
 fun AlertBanner(alert: AlertUi, modifier: Modifier = Modifier, zone: ZoneId? = null) {
     val hapticFeedback = LocalHapticFeedback.current
+    // Localized last resort when the upstream sent neither headline nor type.
+    val headline = alert.headline.ifBlank { stringResource(R.string.alert_generic) }
     // Saveable + keyed to the alert: scrolling away and back keeps the
     // expanded state, matching the hourly and daily cards.
     var expandedFor by rememberSaveable { mutableStateOf<Pair<String, Boolean>?>(null) }
-    val expanded = expandedFor?.first == alert.headline && expandedFor?.second == true
+    val expanded = expandedFor?.first == headline && expandedFor?.second == true
     val clock24 = rememberClock24()
     val expandedState = stringResource(R.string.row_expanded)
     val collapsedState = stringResource(R.string.row_collapsed)
@@ -71,15 +80,21 @@ fun AlertBanner(alert: AlertUi, modifier: Modifier = Modifier, zone: ZoneId? = n
         modifier = modifier
             .fillMaxWidth()
             .animateContentSize()
+            .semantics { liveRegion = LiveRegionMode.Polite }
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(tint.copy(alpha = 0.42f), RoundedCornerShape(24.dp))
-                .clickable(role = Role.Button) { {
-        hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-        expandedFor = alert.headline to !(expanded)
-    }
+                // IntrinsicSize.Min so the severity edge can fill the real
+                // content height — plain fillMaxHeight() collapses to zero
+                // under the LazyColumn's unbounded max height.
+                .height(IntrinsicSize.Min)
+                .clip(RoundedCornerShape(24.dp))
+                .background(tint.copy(alpha = 0.42f))
+                .clickable(role = Role.Button) {
+                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                    expandedFor = headline to !expanded
+                }
                 .semantics(mergeDescendants = true) {
                     stateDescription = if (expanded) expandedState else collapsedState
                 },
@@ -100,11 +115,16 @@ fun AlertBanner(alert: AlertUi, modifier: Modifier = Modifier, zone: ZoneId? = n
                     .padding(start = 20.dp, end = 16.dp, top = 14.dp, bottom = 14.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("⚠️", fontSize = 20.sp)
+                    Icon(
+                        imageVector = Icons.Filled.Warning,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(20.dp),
+                    )
                     Spacer(Modifier.size(10.dp))
                     Column {
                         Text(
-                            text = alert.headline,
+                            text = headline,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Color.White,

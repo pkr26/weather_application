@@ -37,16 +37,16 @@ if (buildingRelease && apiBaseUrl == emulatorBaseUrl) {
 
 android {
     namespace = "com.cirrus.weather"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.cirrus.weather"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         // Version comes from the tag-driven release workflow
         // (-PversionCode/-PversionName); local builds fall back to these.
-        versionCode = (gradle.startParameter.projectProperties["versionCode"] ?: "3").toInt()
-        versionName = gradle.startParameter.projectProperties["versionName"] ?: "1.2.0"
+        versionCode = (gradle.startParameter.projectProperties["versionCode"] ?: "4").toInt()
+        versionName = gradle.startParameter.projectProperties["versionName"] ?: "1.2.1"
 
         // The app talks only to the Cirrus backend; the Google Weather API key
         // lives server-side (backend/.env) and is never shipped in the APK.
