@@ -29,6 +29,10 @@ export function requireApiToken(token: string) {
       next()
       return
     }
-    res.status(401).json({ error: 'unauthorized', message: 'Missing or invalid API token.' })
+    // Distinct error code from device-secret failures ("unauthorized"): the
+    // Android client resets its device identity on "unauthorized" — an
+    // API-token 401 no reset can fix must not trigger that churn (one
+    // orphan server-side record per app open). Both stay HTTP 401.
+    res.status(401).json({ error: 'invalid_api_token', message: 'Missing or invalid API token.' })
   }
 }

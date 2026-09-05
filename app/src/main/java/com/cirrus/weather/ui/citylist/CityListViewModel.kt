@@ -86,12 +86,28 @@ class CityListViewModel(
 
     private val miniFetchedAt = MutableStateFlow<Map<String, Long>>(emptyMap())
 
+    // Mini-card refreshes are gated on the sheet actually being visible:
+    // the ViewModel outlives its screen, and without this gate every
+    // cities-flow emission (e.g. a 2-hourly seen-alert write during a
+    // storm) would re-run staleness checks — and fetch — with the sheet
+    // closed and the screen off.
+    private val visible = MutableStateFlow(false)
+
+    /** The sheet reports its composition lifecycle; becoming visible also
+     *  re-runs the staleness pass — the sheet may reopen with no cities
+     *  emission in between. */
+    fun setVisible(value: Boolean) {
+        if (visible.value == value) return
+        visible.value = value
+        if (value) _cities.value.forEach { city -> refreshMiniIfStale(city) }
+    }
+
     init {
         viewModelScope.launch {
             settings.cities.collect { list ->
                 _cities.value = list
                 _bootstrapped.value = true
-                list.forEach { city -> refreshMiniIfStale(city) }
+                if (visible.value) list.forEach { city -> refreshMiniIfStale(city) }
             }
         }
         viewModelScope.launch {

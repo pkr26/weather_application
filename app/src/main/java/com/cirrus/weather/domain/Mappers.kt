@@ -19,7 +19,7 @@ import com.cirrus.weather.util.TimeFormats
  * after converting by that unit, so a future upstream default change can
  * never silently skew every displayed value.
  */
-private const val MPH_PER_KPH = 1.609344
+private const val KILOMETERS_PER_MILE = 1.609344
 
 private fun TemperatureDto?.normalized(): Double? {
     val d = this?.degrees ?: return null
@@ -32,7 +32,7 @@ private fun TemperatureDto?.normalized(): Double? {
 private fun SpeedDto?.normalizedKph(): Double? {
     val v = this?.value ?: return null
     return when (unit?.uppercase()) {
-        "MILES_PER_HOUR", "MPH" -> v * MPH_PER_KPH
+        "MILES_PER_HOUR", "MPH" -> v * KILOMETERS_PER_MILE
         else -> v // KILOMETERS_PER_HOUR is the documented default
     }
 }
@@ -41,7 +41,7 @@ private fun VisibilityDto?.normalizedKm(): Double? {
     val v = this?.distance ?: return null
     return when (unit?.uppercase()) {
         "METERS" -> v / 1000
-        "MILES" -> v * MPH_PER_KPH
+        "MILES" -> v * KILOMETERS_PER_MILE
         else -> v // KILOMETERS is the documented default
     }
 }

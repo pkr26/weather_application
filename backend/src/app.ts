@@ -152,7 +152,7 @@ export function createApp(config: Config, services = buildServices(config)): Exp
     v1.use((req, res, next) => (isHealth(req.path) ? next() : gate(req, res, next)))
   }
   v1.use(healthRouter())
-  v1.use(languagesRouter())
+  v1.use(languagesRouter(services))
   // Weather + notification reads fan out into several upstream calls per
   // cache miss (paginated days/hours), so they carry their own budget to
   // protect upstream quota from coordinate-cycling abuse.

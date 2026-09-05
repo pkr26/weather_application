@@ -62,9 +62,15 @@ import com.cirrus.weather.util.TimeFormats
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /** How many days the card shows; the backend sends 10, the UI keeps it digestible. */
 private const val DISPLAYED_DAYS = 5
+
+/** Width of a flat day's range marker, as a fraction of the track: equal
+ *  min/max still needs a visible bar — just not one that pretends to a range. */
+private const val FLAT_BAR_FRACTION = 0.12f
 
 /**
  * The 5-day forecast card. Each row shows an icon, min/max temps and a
@@ -323,17 +329,39 @@ private fun RangeBar(
                 val trackHeight = 3.dp.toPx().coerceAtMost(h)
                 val barTop = Offset(0f, h / 2f - trackHeight / 2f)
                 val corner = CornerRadius(999f)
-                val startFraction = (((day.minTempC ?: globalMin) - globalMin) / span)
-                    .toFloat().coerceIn(0f, 1f)
-                val endFraction = (((day.maxTempC ?: globalMax) - globalMin) / span)
-                    .toFloat().coerceIn(0f, 1f)
+                val dayMin = day.minTempC ?: globalMin
+                val dayMax = day.maxTempC ?: globalMax
+                // A day whose own min and max are equal renders a small
+                // centered element, not a 2 px sliver: centered on where the
+                // temperature sits in the global span — or mid-track when the
+                // whole span collapses (all-equal forecast) and no position
+                // information is left to show.
+                val startFraction: Float
+                val endFraction: Float
+                if (dayMax - dayMin > 0.01) {
+                    startFraction = (((dayMin - globalMin) / span).toFloat()).coerceIn(0f, 1f)
+                    endFraction = (((dayMax - globalMin) / span).toFloat()).coerceIn(0f, 1f)
+                } else {
+                    val center = if (globalMax - globalMin > 0.01) {
+                        (((dayMin - globalMin) / span).toFloat()).coerceIn(0f, 1f)
+                    } else 0.5f
+                    startFraction = (center - FLAT_BAR_FRACTION / 2f).coerceIn(0f, 1f)
+                    endFraction = (center + FLAT_BAR_FRACTION / 2f).coerceIn(0f, 1f)
+                }
                 val x0 = startFraction * w
                 val x1Full = (endFraction * w).coerceAtLeast(x0 + 2f)
                 val gradient =
                     if (x1Full - x0 > 1f) Brush.horizontalGradient(gradientColors, x0, x1Full)
                     else null
                 val dotX = currentTempC?.let {
-                    (((it - globalMin) / span).toFloat() * w).coerceIn(0f, w)
+                    if (globalMax - globalMin > 0.01) {
+                        (((it - globalMin) / span).toFloat() * w).coerceIn(0f, w)
+                    } else {
+                        // Collapsed global span: the dot rides the centered
+                        // flat element instead of pinning to the track's left
+                        // edge, far from the bar it belongs to.
+                        0.5f * w
+                    }
                 }
                 onDrawBehind {
                     // Track
@@ -415,11 +443,25 @@ private fun DetailLine(label: String, value: String) {
     }
 }
 
+// Formatter creation is not free and weekdayLabel runs per row on every
+// recomposition of the card; cached on the default locale so a mid-session
+// locale change still switches day-name language. Composition is main-thread
+// only, so the unsynchronized var is safe.
+private var cachedWeekdayFormatter: Pair<Locale, DateTimeFormatter>? = null
+
+private fun weekdayFormatter(locale: Locale): DateTimeFormatter {
+    cachedWeekdayFormatter?.let { (cachedLocale, formatter) ->
+        if (cachedLocale == locale) return formatter
+    }
+    return DateTimeFormatter.ofPattern("EEE", locale).also {
+        cachedWeekdayFormatter = locale to it
+    }
+}
+
 private fun weekdayLabel(epochDay: Long): String {
     // Locale-aware short weekday ("Mon"/"lun."/"सोम") — the screen's other
     // copy is backend-localized, so English day names would stick out.
-    return java.time.format.DateTimeFormatter.ofPattern("EEE", java.util.Locale.getDefault())
-        .format(LocalDate.ofEpochDay(epochDay))
+    return weekdayFormatter(Locale.getDefault()).format(LocalDate.ofEpochDay(epochDay))
 }
 
 /** Apple's cold-to-hot gradient stops — hoisted: this lookup runs twice per

@@ -20,6 +20,8 @@ export interface WeatherStrings {
   condHeavySnow: string
   condSleet: string
   condHail: string
+  /** Neutral label for an unrecognized condition type (future enum values). */
+  condUnknown: string
   /** {high} and {low} are pre-formatted, unit-suffixed temperatures. */
   highLow: string
   /** {time} is a localized wall-clock time, {p} a 0–100 integer. */

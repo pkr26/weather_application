@@ -122,6 +122,7 @@ fun WeatherScreen(
                     unitPref = unitPref,
                     refreshing = refreshing,
                     stale = s.stale,
+                    degraded = s.degraded,
                     onRefresh = onRefresh,
                     onOpenCities = onOpenCities,
                 )
@@ -204,6 +205,7 @@ private fun ReadyContent(
     unitPref: UnitPref,
     refreshing: Boolean,
     stale: Boolean,
+    degraded: Boolean,
     onRefresh: () -> Unit,
     onOpenCities: () -> Unit,
 ) {
@@ -295,13 +297,20 @@ private fun ReadyContent(
                             modifier = Modifier.entrance(enterKey, 1),
                         )
                     }
-                    if (stale) {
+                    if (stale || degraded) {
+                        // Both notices can be true at once (offline AND a
+                        // truncated fetch behind it); each says something the
+                        // other does not, so neither displaces the other.
                         item {
-                            StaleDataBanner(
+                            Column(
                                 modifier = Modifier
                                     .padding(top = 4.dp)
                                     .entrance(enterKey, 2),
-                            )
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                if (stale) StaleDataBanner()
+                                if (degraded) DegradedDataBanner()
+                            }
                         }
                     }
                     if (bundle.alerts.isNotEmpty()) {
@@ -543,6 +552,36 @@ private fun StaleDataBanner(modifier: Modifier = Modifier) {
             text = stringResource(R.string.stale_banner),
             fontSize = 13.sp,
             color = Color.White.copy(alpha = 0.9f),
+        )
+    }
+}
+
+/**
+ * Quiet notice when the backend served a truncated forecast (its degraded
+ * flag): the hour/day strips are shorter than promised and the user deserves
+ * to know why, but the data shown is fresh — so this is deliberately calmer
+ * than the stale banner, and both can appear together.
+ */
+@Composable
+private fun DegradedDataBanner(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(Color(0xFF33415C).copy(alpha = 0.32f), RoundedCornerShape(20.dp))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.Info,
+            contentDescription = null, // the banner text carries the meaning
+            tint = Color.White.copy(alpha = 0.8f),
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.size(10.dp))
+        Text(
+            text = stringResource(R.string.degraded_banner),
+            fontSize = 13.sp,
+            color = Color.White.copy(alpha = 0.85f),
         )
     }
 }

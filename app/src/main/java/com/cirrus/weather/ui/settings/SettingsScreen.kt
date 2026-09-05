@@ -82,6 +82,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.cirrus.weather.R
 import com.cirrus.weather.ui.theme.CirrusPalette
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
@@ -547,8 +548,13 @@ private fun formatTime(minutes: Int): String {
     // Locale-aware pattern: "a" localizes the day period (a. m./p. m., 오전…)
     // instead of hardcoding English AM/PM for every 12-hour locale.
     val pattern = if (DateFormat.is24HourFormat(LocalContext.current)) "H:mm" else "h:mm a"
-    return java.time.format.DateTimeFormatter.ofPattern(pattern, Locale.getDefault())
-        .format(java.time.LocalTime.of(hour, minute))
+    // This row recomposes on every settings change; the formatter depends
+    // only on (pattern, locale), so build it once per combination.
+    val locale = Locale.getDefault()
+    val formatter = remember(pattern, locale) {
+        DateTimeFormatter.ofPattern(pattern, locale)
+    }
+    return formatter.format(java.time.LocalTime.of(hour, minute))
 }
 
 private fun languageLabel(

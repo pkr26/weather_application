@@ -41,6 +41,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
@@ -88,6 +89,15 @@ fun CityListScreen(
     val search by viewModel.search.collectAsStateWithLifecycle()
     val unitPref by viewModel.unitPref.collectAsStateWithLifecycle()
     val storageReset by viewModel.storageReset.collectAsStateWithLifecycle()
+
+    // The sheet's composition is the visibility signal for the ViewModel's
+    // mini-card refresh loop: while the sheet is closed (its branch disposed
+    // after the root transition), refreshes pause instead of polling every
+    // saved city in the background.
+    DisposableEffect(viewModel) {
+        viewModel.setVisible(true)
+        onDispose { viewModel.setVisible(false) }
+    }
 
     // Deleting is a destructive, unrecoverable action — it always confirms.
     // Only the id is saved (a SavedCity is neither Parcelable nor
@@ -166,7 +176,14 @@ fun CityListScreen(
 
             when (val s = search) {
                 is SearchUi.Results -> {
-                    items(s.results, key = { "r-${it.id}-${it.latitude}-${it.longitude}" }) { result ->
+                    // The geocoder can return the same place twice (duplicate
+                    // ids, or two names resolving to one coordinate); a
+                    // repeated LazyColumn key throws at composition. Dedup on
+                    // exactly the stable key items() uses below.
+                    val uniqueResults = s.results.distinctBy {
+                        "${it.id}-${it.latitude}-${it.longitude}"
+                    }
+                    items(uniqueResults, key = { "r-${it.id}-${it.latitude}-${it.longitude}" }) { result ->
                         SearchResultRow(result, Modifier.animateItem()) {
                             viewModel.addCity(result) {
                                 onCityChosen()

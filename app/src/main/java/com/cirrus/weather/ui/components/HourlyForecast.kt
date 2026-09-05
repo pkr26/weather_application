@@ -366,8 +366,8 @@ private fun buildColumns(
     // must not drag the curve's scale toward 0 °C.
     val knownTemps = hours.mapNotNull { it.temperatureC }
     val minV = knownTemps.minOrNull() ?: 0.0
-    val maxV = (knownTemps.maxOrNull() ?: (minV + 1.0)).coerceAtLeast(minV + 0.0001)
-    val span = (maxV - minV).takeIf { it > 0.0001 } ?: 1.0
+    val maxV = knownTemps.maxOrNull() ?: (minV + 1.0)
+    val span = maxV - minV
 
     // Sunset marker: the column closest in time to the actual sunset, and
     // only if sunset falls inside the visible window (not hours away).
@@ -398,7 +398,12 @@ private fun buildColumns(
             precipPercent = hour.precipProbability?.takeIf { it >= 15 },
             isSunsetMarker = isSunsetColumn,
             sunsetLabel = if (isSunsetColumn && sunset != null) TimeFormats.hourMinute(sunset, zone, clock24) else null,
-            normY = hour.temperatureC?.let { 1f - (((it - minV) / span).toFloat()) } ?: 0.5f,
+            // A collapsed span (all-equal temps) maps to the vertical center:
+            // the 0/span division would pin the curve to the floor, which
+            // reads as a rendering bug, not as a flat forecast.
+            normY = hour.temperatureC?.let { t ->
+                if (span > 0.0001) 1f - (((t - minV) / span).toFloat()) else 0.5f
+            } ?: 0.5f,
         )
     }
 }
@@ -609,16 +614,21 @@ private fun HourColumnContent(
 
 @Composable
 internal fun PrecipDrop(modifier: Modifier = Modifier) {
-    Canvas(modifier) {
-        val w = size.width
-        val h = size.height
-        val path = Path().apply {
-            moveTo(w * 0.5f, 0f)
-            cubicTo(w * 0.9f, h * 0.42f, w * 0.82f, h * 0.72f, w * 0.5f, h)
-            cubicTo(w * 0.18f, h * 0.72f, w * 0.1f, h * 0.42f, w * 0.5f, 0f)
-        }
-        drawPath(path, CirrusPrecipDropColor)
-    }
+    // The teardrop path lives in the draw cache: this glyph renders on most
+    // hourly columns and daily rows, and the entrance sweep redraws all of
+    // them every frame for ~1 s — a Path per draw call is pure churn.
+    Spacer(
+        modifier = modifier.drawWithCache {
+            val w = size.width
+            val h = size.height
+            val path = Path().apply {
+                moveTo(w * 0.5f, 0f)
+                cubicTo(w * 0.9f, h * 0.42f, w * 0.82f, h * 0.72f, w * 0.5f, h)
+                cubicTo(w * 0.18f, h * 0.72f, w * 0.1f, h * 0.42f, w * 0.5f, 0f)
+            }
+            onDrawBehind { drawPath(path, CirrusPrecipDropColor) }
+        },
+    )
 }
 
 private val CirrusPrecipDropColor = Color(0xFFBBD9F7)

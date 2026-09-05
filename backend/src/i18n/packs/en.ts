@@ -22,6 +22,7 @@ export const en: LanguagePack = {
     condHeavySnow: 'Snow',
     condSleet: 'Sleet',
     condHail: 'Hail',
+    condUnknown: 'Conditions unavailable',
     highLow: 'High {high} / Low {low}',
     rainLikely: 'Rain likely around {time} ({p}%)',
     rainPossible: 'Rain possible around {time} ({p}%)',

@@ -67,7 +67,12 @@ private class FakeRegistrarApi(
 }
 
 /** In-memory DeviceIdentity with observable reset behaviour. */
-private class FakeIdentity(var id: String = "device-0001", var stored: String? = null) : DeviceIdentity {
+private class FakeIdentity(
+    var id: String = "device-0001",
+    var stored: String? = null,
+    /** Simulates a keystore vault that refuses every write. */
+    val persistFails: Boolean = false,
+) : DeviceIdentity {
     var resets = 0
 
     override suspend fun deviceId(): String = id
@@ -75,6 +80,7 @@ private class FakeIdentity(var id: String = "device-0001", var stored: String? =
     override suspend fun secret(): String? = stored
 
     override suspend fun storeSecret(secret: String): Boolean {
+        if (persistFails) return false
         stored = secret
         return true
     }
@@ -98,8 +104,8 @@ private class FakeSettings(
     override suspend fun alertsEnabled(): Boolean = alerts
 }
 
-private fun httpError(code: Int): HttpException =
-    HttpException(Response.error<Unit>(code, "".toResponseBody("application/json".toMediaType())))
+private fun httpError(code: Int, body: String = ""): HttpException =
+    HttpException(Response.error<Unit>(code, body.toResponseBody("application/json".toMediaType())))
 
 private val hyderabad = SavedCity(id = "hyd", name = "Hyderabad", latitude = 17.38, longitude = 78.48)
 
@@ -241,5 +247,60 @@ class DeviceRegistrarTest {
         val time = api.calls[0].first.notificationTime
         assertEquals(18, time.hour)
         assertEquals(45, time.minute)
+    }
+
+    @Test
+    fun `a 401 from the api-token gate never resets the identity`() = runTest {
+        // A rotated deployment token is unfixable from the client: resetting
+        // would only mint a ghost registry record per app open.
+        val identity = FakeIdentity(id = "device-0001", stored = "secret")
+        val api = FakeRegistrarApi { _, _ ->
+            throw httpError(401, """{"error":"invalid_api_token","message":"no"}""")
+        }
+
+        registrar(api, identity).register()
+
+        assertEquals(1, api.calls.size)
+        assertEquals(0, identity.resets)
+        assertEquals("secret", identity.stored)
+    }
+
+    @Test
+    fun `an explicit unauthorized body still resets`() = runTest {
+        val identity = FakeIdentity(id = "device-0001", stored = null)
+        val api = FakeRegistrarApi { _, _ ->
+            throw httpError(401, """{"error":"unauthorized","message":"no"}""")
+        }
+        var secondCall = false
+        api.onRegister = { _, _ ->
+            if (secondCall) DeviceRegistrationResponse(deviceSecret = "fresh")
+            else {
+                secondCall = true
+                throw httpError(401, """{"error":"unauthorized","message":"no"}""")
+            }
+        }
+
+        registrar(api, identity).register()
+
+        assertEquals(2, api.calls.size)
+        assertEquals(1, identity.resets)
+    }
+
+    @Test
+    fun `a vault that cannot persist secrets stops the reset churn`() = runTest {
+        // First open: server registers us and issues a secret the vault then
+        // loses. Second open: the unpresentable secret 401s — but resetting
+        // would only orphan another record, so the registrar must stand down.
+        // One registrar instance throughout, matching the app's singleton.
+        val identity = FakeIdentity(id = "device-0001", persistFails = true)
+        val api = FakeRegistrarApi { _, _ -> DeviceRegistrationResponse(deviceSecret = "lost-secret") }
+        val reg = registrar(api, identity)
+
+        reg.register() // 200 + secret the vault drops
+        api.onRegister = { _, _ -> throw httpError(401) } // takeover refused
+        reg.register()
+
+        assertEquals(2, api.calls.size) // one per open — no reset/re-mint extras
+        assertEquals(0, identity.resets)
     }
 }

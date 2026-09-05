@@ -36,15 +36,27 @@ class LastKnownWeatherStore(context: Context) {
     fun put(key: String, bundle: BundleResponse) {
         val file = fileFor(key) ?: return
         runCatching {
-            val payload = json.encodeToString(Cached(System.currentTimeMillis(), bundle))
-            val tmp = File(file.parentFile, "${file.name}.tmp")
-            tmp.writeText(payload)
-            // Atomic swap; the fallback rewrite covers exotic rename failures.
-            if (!tmp.renameTo(file)) {
-                file.writeText(payload)
-                tmp.delete()
-            }
+            writeAtomically(file, json.encodeToString(Cached(System.currentTimeMillis(), bundle)))
         }
+    }
+
+    /**
+     * Temp-file + rename on EVERY path: a mid-write process death must never
+     * leave a truncated snapshot behind, because an undecodable cache reads
+     * as "never cached" — the offline feature would vanish without a trace.
+     * The second staging name covers filesystems whose rename-over-existing
+     * fails only for the exact source name; a platform that rejects both
+     * renames leaves the original file intact rather than half-written.
+     */
+    private fun writeAtomically(file: File, payload: String) {
+        val tmp = File(file.parentFile, "${file.name}.tmp")
+        tmp.writeText(payload)
+        if (tmp.renameTo(file)) return
+        val staging = File(file.parentFile, "${file.name}.new")
+        staging.writeText(payload)
+        if (!staging.renameTo(file)) file.writeText(payload)
+        staging.delete()
+        tmp.delete()
     }
 
     /**

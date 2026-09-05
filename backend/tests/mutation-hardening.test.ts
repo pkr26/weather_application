@@ -390,6 +390,7 @@ describe('GoogleWeatherClient request shapes', () => {
             ok: true,
             status: 200,
             json: async () => ({ timeZone: { id: 'Asia/Kolkata' }, forecastHours: [{ a: 1 }], nextPageToken: 't2' }),
+            text: async () => JSON.stringify({ timeZone: { id: 'Asia/Kolkata' }, forecastHours: [{ a: 1 }], nextPageToken: 't2' }),
           } as Response
         }
         throw new TypeError('page 2 down')
@@ -445,7 +446,7 @@ describe('GoogleWeatherClient request shapes', () => {
       'fetch',
       vi.fn(async (url: URL) => {
         if (String(url).includes('currentConditions')) {
-          return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response
+          return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => JSON.stringify({ ok: true }) } as Response
         }
         throw new TypeError('network down')
       }),
@@ -499,7 +500,7 @@ describe('GoogleWeatherClient request shapes', () => {
       'fetch',
       vi.fn(async () => {
         i++
-        return { ok: i === 1 ? false : true, status: i === 1 ? 503 : 200, json: async () => ({ ok: true }), text: async () => '' } as Response
+        return { ok: i === 1 ? false : true, status: i === 1 ? 503 : 200, json: async () => ({ ok: true }), text: async () => JSON.stringify({ ok: true }) } as Response
       }),
     )
     const client = new GoogleWeatherClient(makeConfig())
@@ -518,7 +519,7 @@ describe('GoogleWeatherClient request shapes', () => {
       vi.fn(async () => {
         i++
         if (i === 1) {
-          return { ok: true, status: 200, json: async () => ({ forecastHours: [{ a: 1 }], nextPageToken: 't' }) } as Response
+          return { ok: true, status: 200, json: async () => ({ forecastHours: [{ a: 1 }], nextPageToken: 't' }), text: async () => JSON.stringify({ forecastHours: [{ a: 1 }], nextPageToken: 't' }) } as Response
         }
         throw new TypeError('page 2 down')
       }),
@@ -536,7 +537,7 @@ describe('GoogleWeatherClient request shapes', () => {
       'fetch',
       vi.fn(async (url: URL) => {
         if (String(url).includes('currentConditions')) {
-          return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response
+          return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => JSON.stringify({ ok: true }) } as Response
         }
         throw new TypeError('network down')
       }),

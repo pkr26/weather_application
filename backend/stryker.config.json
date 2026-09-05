@@ -10,6 +10,7 @@
   "mutate": [
     "src/**/*.ts",
     "!src/index.ts",
+    "!src/env.ts",
     "!src/logger.ts",
     "!src/i18n/packs/**"
   ],

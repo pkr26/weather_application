@@ -148,10 +148,11 @@ export class GoogleWeatherClient {
    * The list endpoints return one page at a time (5 days / 24 hours per
    * page) with a nextPageToken. Fetches pages until [target] items are
    * collected or the token runs out, then merges them into a single
-   * response shaped exactly like one page. If a later page fails, the
-   * pages already fetched are still returned — partial beats absent — but
-   * the result is flagged `truncated` so callers can mark the bundle
-   * degraded (a silently shortened forecast must never look healthy).
+   * response shaped exactly like one page. If a later page fails, or
+   * answers 200 without the expected list key, the pages already fetched
+   * are still returned — partial beats absent — but the result is flagged
+   * `truncated` so callers can mark the bundle degraded (a silently
+   * shortened forecast must never look healthy).
    */
   private async callPaged(
     path: string,
@@ -176,29 +177,50 @@ export class GoogleWeatherClient {
         if (page === 0) throw err
         // No explicit `truncated = true` here: every reachable catch entry
         // implies merged.length < target AND a defined page token, so the
-        // post-loop linger condition re-derives truncation on every path.
+        // post-loop linger condition re-derives truncation on this path
+        // (the shapeless-200 path above sets the flag explicitly because
+        // its missing token would otherwise look terminal).
         // Stryker disable StringLiteral: log-only message — the truncation the linger condition derives is what tests observe
         logger.warn({ path, page, err: String(err) }, 'Paged fetch failed, serving partial list')
         // Stryker restore StringLiteral
         break
       }
-      if (page === 0) {
-        // Contract guard: a first page without the expected list key is an
-        // upstream contract change (renamed field, envelope change), not an
-        // answer — serving it as healthy would cache empty forecasts for the
-        // full TTL and let briefings claim "no rain" all day.
-        if (!Array.isArray(res[listKey])) {
+      const items = Array.isArray(res[listKey]) ? (res[listKey] as unknown[]) : undefined
+      if (items === undefined) {
+        if (page === 0) {
+          // Contract guard: a first page without the expected list key is an
+          // upstream contract change (renamed field, envelope change), not an
+          // answer — serving it as healthy would cache empty forecasts for the
+          // full TTL and let briefings claim "no rain" all day.
           // Stryker disable StringLiteral: the message is log-only; the degraded flag the throw produces is what tests observe
           throw new UpstreamError(
             `${path} returned an unexpected shape (missing ${listKey}) — treating as failure`,
           )
           // Stryker restore StringLiteral
         }
-        firstPage = res
+        // The same contract break mid-pagination (page ≥ 1, HTTP 200) must
+        // also degrade: this page is only fetched while items are still owed
+        // (merged.length < target), and a shapeless page carries no string
+        // nextPageToken — so the post-loop linger condition below would see
+        // a "terminal" page and serve a shortened forecast as healthy.
+        // Stryker disable StringLiteral: log-only message — the truncated flag is what tests observe
+        logger.warn({ path, page }, 'Paged response lost its list key, serving partial list')
+        // Stryker restore StringLiteral
+        // Stryker disable BooleanLiteral: verified equivalent — a later page is only reached while a token lingers from the page before, and the shapeless break happens before token is reassigned, so the post-loop linger condition re-derives truncated=true on this path either way
+        truncated = true
+        // Stryker restore BooleanLiteral
+        break
       }
-      const items = Array.isArray(res[listKey]) ? (res[listKey] as unknown[]) : []
+      if (page === 0) firstPage = res
       merged = merged.concat(items)
       token = typeof res.nextPageToken === 'string' ? res.nextPageToken : undefined
+      // A token-less EMPTY first page is upstream contract drift too: the
+      // request asked for [target] items and a forecast always has at least
+      // one — an empty answer must not be cached as a healthy 0-hour
+      // forecast. (An empty page WITH a token keeps paging normally.)
+      if (page === 0 && merged.length === 0 && token === undefined && target > 0) {
+        truncated = true
+      }
       if (token === undefined || merged.length >= target) break
     }
     // The upstream still owes us items but the safety cap is exhausted. A
@@ -318,7 +340,11 @@ export class GoogleWeatherClient {
     }
   }
 
-  /** All five endpoints in parallel; non-critical ones fail soft (empty object). */
+  /**
+   * The four core endpoints in parallel, then alerts — the route layer
+   * (loadBundleParts) fetches core and alerts concurrently instead;
+   * non-critical endpoints fail soft (empty object).
+   */
   async bundle(c: Coord, alertsLanguage = 'en'): Promise<WeatherBundle> {
     const core = await this.coreBundle(c)
     let alertsFailed = false

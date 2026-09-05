@@ -46,7 +46,11 @@ internal fun playOnce(
     val effectiveKey: String = key?.toString() ?: "playOnce-default"
     val reducedMotion = rememberReducedMotion()
     var playedFor by rememberSaveable { mutableStateOf<String?>(null) }
-    val progress = remember {
+    // Keyed on effectiveKey: when a different city's content takes over the
+    // slot, the Animatable must restart from 0 or animateTo(1f) starts at 1
+    // and the sweep is over in a single frame. Same-key recomposition keeps
+    // the instance, so a running animation is never restarted mid-flight.
+    val progress = remember(effectiveKey) {
         Animatable(
             if (playedFor == effectiveKey || reducedMotion) 1f else 0f
         )

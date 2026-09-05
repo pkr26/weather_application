@@ -240,7 +240,10 @@ describe('API token gate', () => {
 
     const bare = await request(app).get('/api/v1/languages')
     expect(bare.status).toBe(401)
-    expect(bare.body.error).toBe('unauthorized')
+    // The API-token 401 carries its own error code: the Android client
+    // resets its device identity on "unauthorized", and no reset can fix a
+    // missing API token — the two failure bodies must never be identical.
+    expect(bare.body.error).toBe('invalid_api_token')
     expect(bare.body.message).toBe('Missing or invalid API token.')
 
     const wrong = await request(app).get('/api/v1/languages').set('X-Api-Token', 'nope')
@@ -252,6 +255,13 @@ describe('API token gate', () => {
     // Container/LB healthchecks must keep working without the token.
     const health = await request(app).get('/api/v1/health')
     expect(health.status).toBe(200)
+    // Trailing-slash variants (LB normalisation) stay exempt too: the
+    // exemption trims the slashes before matching.
+    const healthSlash = await request(app).get('/api/v1/health/')
+    expect(healthSlash.status).toBe(200)
+    const healthSlashes = await request(app).get('/api/v1/health///')
+    // Exempt from the gate — merely unrouted (404, never a gated 401).
+    expect(healthSlashes.status).toBe(404)
   })
 
   it('guards writes with the token too', async () => {
@@ -270,6 +280,24 @@ describe('API token gate', () => {
       .set('X-Api-Token', 'cirrus-shared-secret')
       .send(device)
     expect(allowed.status).toBe(201)
+  })
+
+  it('marks cacheable routes private while the token gate is on', async () => {
+    // `public` would let a shared cache store token-gated payloads and serve
+    // them to callers without the token — bypassing the gate entirely.
+    const app = makeApp({ API_TOKEN: 'cirrus-shared-secret' })
+
+    const langs = await request(app)
+      .get('/api/v1/languages')
+      .set('X-Api-Token', 'cirrus-shared-secret')
+    expect(langs.status).toBe(200)
+    expect(langs.headers['cache-control']).toBe('private, max-age=86400')
+
+    const geo = await request(app)
+      .get('/api/v1/geocode?name=Hyderabad')
+      .set('X-Api-Token', 'cirrus-shared-secret')
+    expect(geo.status).toBe(200)
+    expect(geo.headers['cache-control']).toBe('private, max-age=300')
   })
 })
 

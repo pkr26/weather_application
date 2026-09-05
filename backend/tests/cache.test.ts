@@ -302,4 +302,18 @@ describe('SharedScope direct semantics', () => {
     // live one still kills the flight.
     expect(scope.signal.aborted).toBe(true)
   })
+
+  it("propagates the last participant's abort reason to the flight signal", async () => {
+    const { SharedScope } = await import('../src/cache.js')
+    const scope = new SharedScope()
+    const participant = new AbortController()
+    scope.join(participant.signal)
+    const reason = new DOMException('signal timed out', 'TimeoutError')
+    participant.abort(reason)
+    expect(scope.signal.aborted).toBe(true)
+    // The deadline's TimeoutError must survive the SharedScope hop: the HTTP
+    // layer reads it off the flight signal to answer 504 (our deadline
+    // fired) instead of 502 (client hung up).
+    expect(scope.signal.reason).toBe(reason)
+  })
 })

@@ -81,9 +81,14 @@ const envSchema = z.object({
    * leaves the API open as before; when set, every request except
    * GET /api/v1/health must present it as X-Api-Token. Meant for deployments
    * where the backend is publicly reachable and must not proxy the metered
-   * weather API for strangers.
+   * weather API for strangers. When set it must be at least 16 characters —
+   * a short token is brute-forceable within request budgets and would be a
+   * gate in name only.
    */
-  API_TOKEN: z.string().default(''),
+  API_TOKEN: z
+    .string()
+    .default('')
+    .refine((t) => t === '' || t.length >= 16, 'API_TOKEN must be at least 16 characters when set'),
 
   // Device registry persistence (swap for a real DB at scale).
   DATA_DIR: z.string().default('data'),
@@ -107,7 +112,9 @@ const envSchema = z.object({
 const schema = envSchema.superRefine((v, ctx) => {
   if (v.UPSTREAM_DEADLINE_MS <= v.UPSTREAM_TIMEOUT_MS) {
     ctx.addIssue({
+      // Stryker disable StringLiteral: verified unobservable — loadConfig's thrown Error lists only "path: message" lines and nothing reads the zod issue's code
       code: 'custom',
+      // Stryker restore StringLiteral
       path: ['UPSTREAM_DEADLINE_MS'],
       message: 'UPSTREAM_DEADLINE_MS must exceed UPSTREAM_TIMEOUT_MS',
     })

@@ -1,18 +1,11 @@
+// First import, before anything that reads process.env at module scope (the
+// pino logger's LOG_LEVEL): ESM evaluates this chain depth-first, so './env.js'
+// must precede './app.js' for .env values to be visible to every module.
+import './env.js'
 import { createApp } from './app.js'
 import { loadConfig } from './config.js'
 import { logger } from './logger.js'
 import { draining } from './readiness.js'
-
-// Load backend/.env when present (plain key=value, no shell features).
-// process.loadEnvFile exists only on Node >= 20.12 — probe before calling so
-// older 20.x fails with the honest env error instead of a TypeError.
-try {
-  if (typeof process.loadEnvFile === 'function') process.loadEnvFile()
-} catch (err) {
-  if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-    logger.warn({ err: String(err) }, 'Could not load .env — relying on real environment variables')
-  }
-}
 
 const config = loadConfig()
 const app = createApp(config)
@@ -23,6 +16,16 @@ const server = app.listen(config.PORT, config.HOST, () => {
     `Cirrus backend listening on http://${config.HOST}:${config.PORT}`,
   )
 })
+
+// Explicit request-lifecycle timeouts instead of Node's generous defaults:
+// headers must arrive within 10 s (slowloris sockets hold no worker for
+// long), the whole request gets 35 s — above the 20 s upstream deadline so
+// the deadline, not the server, produces the client's error — and idle
+// keep-alive sockets (OkHttp pools them) are reaped at 5 s so a draining
+// instance can actually close.
+server.headersTimeout = 10_000
+server.requestTimeout = 35_000
+server.keepAliveTimeout = 5_000
 
 // Startup failures (port already in use, missing capabilities) exit with a
 // clean one-liner instead of a stack dump.

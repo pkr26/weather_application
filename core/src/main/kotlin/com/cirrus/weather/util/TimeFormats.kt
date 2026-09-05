@@ -2,6 +2,7 @@ package com.cirrus.weather.util
 
 import java.time.Instant
 import java.time.LocalDate
+import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
@@ -20,11 +21,22 @@ object TimeFormats {
     private val dayMonth: DateTimeFormatter =
         DateTimeFormatter.ofPattern("MMM d", Locale.ENGLISH)
 
-    /** Parses RFC 3339 UTC timestamps like 2026-09-03T17:30:00Z (with or without nanos). */
-    fun parseUtc(raw: String?): Instant? = try {
-        raw?.let { Instant.parse(raw) }
-    } catch (_: DateTimeParseException) {
-        null
+    /** Parses RFC 3339 timestamps like 2026-09-03T17:30:00Z (with or
+     *  without nanos). The offset fallback matters on API 26-29, whose
+     *  java.time predates offset-aware ISO_INSTANT parsing: an upstream
+     *  "+05:30"-style timestamp would otherwise throw and silently drop
+     *  the whole hour from the strip. */
+    fun parseUtc(raw: String?): Instant? {
+        if (raw == null) return null
+        return try {
+            Instant.parse(raw)
+        } catch (_: DateTimeParseException) {
+            try {
+                OffsetDateTime.parse(raw).toInstant()
+            } catch (_: DateTimeParseException) {
+                null
+            }
+        }
     }
 
     /** Invalid/unparseable zone ids fall back to UTC — callers pass a

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync, chmodSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync, chmodSync } from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -71,7 +71,7 @@ describe('DeviceStore', () => {
     expect(saved.deviceId).toBe('device-12345678')
   })
 
-  it('ignores a store file with an unexpected version', async () => {
+  it('quarantines a store file with an unexpected version instead of overwriting it', async () => {
     const dataDir = dir('version')
     const store = new DeviceStore(dataDir)
     await store.upsert(sampleRecord())
@@ -80,6 +80,33 @@ describe('DeviceStore', () => {
 
     const reopened = new DeviceStore(dataDir)
     expect(await reopened.get('device-12345678')).toBeNull()
+    // The foreign-format file is renamed aside, not destroyed: a future
+    // store version's data must survive for migration instead of being
+    // silently overwritten by the next persist.
+    const files = readdirSync(dataDir)
+    expect(files.includes('devices.json')).toBe(false)
+    expect(files.some((f) => f.startsWith('devices.json.wrongversion-'))).toBe(true)
+    // And the store stays writable afterwards (fresh file on next persist).
+    await reopened.upsert(sampleRecord('device-version002'))
+    expect(readFileSync(path.join(dataDir, 'devices.json'), 'utf8')).toContain('device-version002')
+  })
+
+  it('starts fresh even when the quarantine rename itself fails', async () => {
+    // EXDEV/EIO on the rename-aside must not break the fresh-start path —
+    // the catch is by design; the store still loads empty and stays writable.
+    const dataDir = dir('version-rename-fail')
+    const store = new DeviceStore(dataDir)
+    await store.upsert(sampleRecord('device-version-x'))
+    const file = path.join(dataDir, 'devices.json')
+    writeFileSync(file, JSON.stringify({ version: 99, devices: {} }))
+    const renameSpy = vi.spyOn(fsp, 'rename').mockRejectedValueOnce(new Error('EXDEV'))
+    try {
+      const reopened = new DeviceStore(dataDir)
+      await reopened.upsert(sampleRecord('device-version-y'))
+      expect(await reopened.get('device-version-y')).toBeTruthy()
+    } finally {
+      renameSpy.mockRestore()
+    }
   })
 
   it('persists the secret hash but publicDevice strips it', async () => {
@@ -182,6 +209,53 @@ describe('DeviceStore', () => {
     // Updating an existing record is never blocked by the cap.
     const updated = await store.upsert(sampleRecord('device-cap-00001'))
     expect(updated.deviceId).toBe('device-cap-00001')
+  })
+
+  it('prunes expired records on write so a create at the cap reclaims dead slots', async () => {
+    // The load-time prune cannot help here: the record ages out while this
+    // process lives, so the cap check itself must evict it.
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+      const store = new DeviceStore(dir('prune-write'), 1, 60 * 60 * 1000)
+      await store.createIfAbsent(sampleRecord('device-stale-001'))
+
+      // One hour later the only record is expired — a fresh device must
+      // reclaim its slot instead of 503-ing until a restart.
+      vi.setSystemTime(new Date('2026-01-01T02:00:00Z'))
+      const created = await store.createIfAbsent(sampleRecord('device-fresh-001'))
+      expect(created.created).toBe(true)
+      expect(await store.get('device-stale-001')).toBeNull()
+      expect(await store.get('device-fresh-001')).toBeTruthy()
+
+      // A cap full of LIVE records still refuses (no eviction of the living).
+      await expect(store.createIfAbsent(sampleRecord('device-fresh-002'))).rejects.toBeInstanceOf(
+        RegistryFullError,
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('prune-on-write keeps live records — only expired slots are reclaimed', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+      const store = new DeviceStore(dir('prune-live'), 2, 60 * 60 * 1000)
+      await store.createIfAbsent(sampleRecord('device-stale-001'))
+      vi.setSystemTime(new Date('2026-01-01T01:30:00Z'))
+      await store.createIfAbsent(sampleRecord('device-live-001'))
+      // At 02:00: stale-001 (00:00) is 2h old — past the 1h max age — while
+      // live-001 (01:30) is half an hour old: the cap prune must evict only
+      // the dead slot and the survivor must still be served.
+      vi.setSystemTime(new Date('2026-01-01T02:00:00Z'))
+      const created = await store.createIfAbsent(sampleRecord('device-new-00001'))
+      expect(created.created).toBe(true)
+      expect(await store.get('device-stale-001')).toBeNull()
+      expect(await store.get('device-live-001')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('creates deeply missing data directories on first persist', async () => {
@@ -379,6 +453,78 @@ describe('corrupt-file quarantine when the directory is read-only', () => {
       expect(await reopened.get('device-12345678')).toBeNull()
     } finally {
       chmodSync(dataDir, 0o755)
+    }
+  })
+})
+
+describe('version-mismatch quarantine scope and diagnostics', () => {
+  it('leaves a v1 file with a junk devices field in place — only a declared foreign version is quarantined', async () => {
+    // A file that DECLARES version 1 but fails the shape check is ignored
+    // in place, not renamed aside: the quarantine is reserved for a
+    // declared foreign version, whose data a future migration may need.
+    const dataDir = dir('v1-junk-devices')
+    await new DeviceStore(dataDir).upsert(sampleRecord())
+    writeFileSync(path.join(dataDir, 'devices.json'), JSON.stringify({ version: 1, devices: 'nope' }))
+
+    const reopened = new DeviceStore(dataDir)
+    expect(await reopened.get('device-12345678')).toBeNull()
+    const files = readdirSync(dataDir)
+    expect(files.includes('devices.json')).toBe(true)
+    expect(files.some((f) => f.startsWith('devices.json.wrongversion-'))).toBe(false)
+  })
+
+  it('warns with the foreign version and the file when quarantining a mismatch', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const dataDir = dir('version-warn')
+    await new DeviceStore(dataDir).upsert(sampleRecord())
+    const file = path.join(dataDir, 'devices.json')
+    writeFileSync(file, JSON.stringify({ version: 99, devices: {} }))
+
+    const reopened = new DeviceStore(dataDir)
+    await reopened.get('device-12345678')
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0][1]).toBe('Device store version mismatch — quarantined, starting fresh')
+    expect(warn.mock.calls[0][0]).toMatchObject({ version: '99', file })
+    warn.mockRestore()
+  })
+})
+
+describe('prune-on-write boundaries', () => {
+  it('keeps a record exactly AT the cutoff — expiry is strict, not inclusive', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+      const store = new DeviceStore(dir('prune-boundary'), 1, 60 * 60 * 1000)
+      await store.createIfAbsent(sampleRecord('device-atcutoff1'))
+
+      // Exactly one max-age later the cutoff EQUALS the record's updatedAt
+      // instant: max age is "not updated within", so the record is still
+      // live and the cap stays genuinely full.
+      vi.setSystemTime(new Date('2026-01-01T01:00:00Z'))
+      await expect(
+        store.createIfAbsent(sampleRecord('device-later-0001')),
+      ).rejects.toBeInstanceOf(RegistryFullError)
+      expect(await store.get('device-atcutoff1')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not prune below the cap — reclamation engages only under slot pressure', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+      const store = new DeviceStore(dir('prune-lazy'), 5, 60 * 60 * 1000)
+      await store.createIfAbsent(sampleRecord('device-oldslot01'))
+
+      // Hours later the record is long expired, but the registry is nearly
+      // empty: without cap pressure the expired slot stays (load-time
+      // pruning and pressure pruning are the only eviction points).
+      vi.setSystemTime(new Date('2026-01-01T03:00:00Z'))
+      await store.createIfAbsent(sampleRecord('device-newslot01'))
+      expect(await store.get('device-oldslot01')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
     }
   })
 })

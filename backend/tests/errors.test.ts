@@ -320,6 +320,41 @@ describe('errorHandler — upstream throttling', () => {
     expect(capture.statusCode).toBe(502)
     expect(capture.headers['Retry-After']).toBeUndefined()
   })
+
+  it('a deadline expiry maps to 504 Gateway Timeout without Retry-After', () => {
+    const { res, capture } = fakeRes()
+    errorHandler(
+      new UpstreamError(
+        'call aborted: request scope closed',
+        undefined,
+        undefined,
+        undefined,
+        'deadline',
+      ),
+      {} as never,
+      res,
+      {} as never,
+    )
+    expect(capture.statusCode).toBe(504)
+    expect(capture.body).toEqual({
+      error: 'upstream_error',
+      message: 'Upstream weather service did not answer in time. Try again shortly.',
+    })
+    // The deadline is not the upstream's backoff instruction — no hint is
+    // attached; a fresh request with a fresh budget is legitimate.
+    expect(capture.headers['Retry-After']).toBeUndefined()
+  })
+
+  it('a client hang-up stays a 502 even when explicitly classified', () => {
+    const { res, capture } = fakeRes()
+    errorHandler(
+      new UpstreamError('call aborted: request scope closed', undefined, undefined, undefined, 'client'),
+      {} as never,
+      res,
+      {} as never,
+    )
+    expect(capture.statusCode).toBe(502)
+  })
 })
 
 describe('errorHandler — throttling without Retry-After', () => {

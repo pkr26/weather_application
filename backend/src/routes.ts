@@ -50,13 +50,23 @@ function query<T extends z.ZodTypeAny>(req: Request, schema: T): z.infer<T> {
 
 const coord = (q: { lat: number; lon: number }): Coord => ({ latitude: q.lat, longitude: q.lon })
 
+/**
+ * Freshness scope for cacheable routes: token-gated deployments must mark
+ * responses `private` — a shared cache that stored one could serve it to
+ * callers without the token, bypassing the gate entirely. `public` (with its
+ * CDN savings) is reserved for the open, no-token configuration.
+ */
+function freshnessScope(svc: Services): 'public' | 'private' {
+  return svc.config.API_TOKEN ? 'private' : 'public'
+}
+
 /** Freshness transparency: tells clients how old the served data is. */
 function freshnessHeaders(
   res: Response,
   cache: 'hit' | 'miss',
   ageMs: number,
   ttlMs: number,
-  scope: 'public' | 'private' = 'public',
+  scope: 'public' | 'private',
 ): void {
   res.setHeader('X-Cache', cache)
   res.setHeader('X-Data-Age-Seconds', String(Math.floor(ageMs / 1000)))
@@ -101,32 +111,35 @@ function upstreamScope(svc: Services, req: Request, res: Response): AbortSignal 
 
 /**
  * Loads core + localized alerts and merges them into a bundle response.
- * Each request contributes its own scope (deadline + disconnect) to the
- * shared flight via the cache's participant set; the load aborts only when
- * every participant is gone.
+ * The two fan-outs are independent — they run in parallel so a miss pays
+ * the slower of the two, not their sum. Each request contributes its own
+ * scope (deadline + disconnect) to the shared flight via the cache's
+ * participant set; the load aborts only when every participant is gone.
  */
 async function loadBundleParts(svc: Services, c: Coord, lang: string, signal?: AbortSignal) {
-  const core = await svc.coreCache.getOrLoadWithMeta(
-    coordKey(c.latitude, c.longitude),
-    (flight) => svc.weather.coreBundle(c, flight),
-    { ...coreCacheOpts(svc), signal },
-  )
   // Alerts fail soft: the rest of the bundle is still useful without them.
   let alertsFailed = false
-  const alerts = await svc.alertsCache
-    .getOrLoadWithMeta(
-      `${coordKey(c.latitude, c.longitude)}|${lang}`,
-      (flight) => svc.weather.publicAlerts(c, lang, flight),
-      // Stryker disable ObjectLiteral,ArrowFunction: the opts shape is unobservable — alerts metadata comes from the served entry, and this TTL never reaches a client-visible header
-      { ttlFor: () => svc.config.ALERTS_CACHE_TTL_MS, signal },
-      // Stryker restore ObjectLiteral,ArrowFunction
-    )
-    .catch(() => {
-      alertsFailed = true
-      // Stryker disable ObjectLiteral,ArrowFunction: the fallback object's exact shape is unobservable — the degraded flag it produces is what the response asserts
-      return { value: {} as unknown, cache: 'miss' as const, ageMs: 0, ttlMs: svc.config.ALERTS_CACHE_TTL_MS }
-      // Stryker restore ObjectLiteral,ArrowFunction
-    })
+  const [core, alerts] = await Promise.all([
+    svc.coreCache.getOrLoadWithMeta(
+      coordKey(c.latitude, c.longitude),
+      (flight) => svc.weather.coreBundle(c, flight),
+      { ...coreCacheOpts(svc), signal },
+    ),
+    svc.alertsCache
+      .getOrLoadWithMeta(
+        `${coordKey(c.latitude, c.longitude)}|${lang}`,
+        (flight) => svc.weather.publicAlerts(c, lang, flight),
+        // Stryker disable ObjectLiteral,ArrowFunction: the opts shape is unobservable — alerts metadata comes from the served entry, and this TTL never reaches a client-visible header
+        { ttlFor: () => svc.config.ALERTS_CACHE_TTL_MS, signal },
+        // Stryker restore ObjectLiteral,ArrowFunction
+      )
+      .catch(() => {
+        alertsFailed = true
+        // Stryker disable ObjectLiteral,ArrowFunction: the fallback object's exact shape is unobservable — the degraded flag it produces is what the response asserts
+        return { value: {} as unknown, cache: 'miss' as const, ageMs: 0, ttlMs: svc.config.ALERTS_CACHE_TTL_MS }
+        // Stryker restore ObjectLiteral,ArrowFunction
+      }),
+  ])
   return { core, alerts, alertsFailed }
 }
 
@@ -140,16 +153,19 @@ export function healthRouter(): Router {
       res.status(503).json({ status: 'draining' })
       return
     }
-    res.json({ status: 'ok', uptime: process.uptime() })
+    // Status only: process.uptime() leaked deployment details (boot times,
+    // restart patterns) to any unauthenticated prober.
+    res.json({ status: 'ok' })
   })
 }
 
 // ------------------------------------------------------------- languages
 
-export function languagesRouter(): Router {
+export function languagesRouter(svc: Services): Router {
   return Router().get('/languages', (_req, res) => {
-    // The catalog only changes on deploy — let clients cache it for a day.
-    res.setHeader('Cache-Control', 'public, max-age=86400')
+    // The catalog only changes on deploy — let clients cache it for a day
+    // (privately when the token gate is on; see freshnessScope).
+    res.setHeader('Cache-Control', `${freshnessScope(svc)}, max-age=86400`)
     res.json({ languages: languageCatalog() })
   })
 }
@@ -173,7 +189,7 @@ export function weatherRouter(svc: Services): Router {
       const servedTtl = alertsFailed
         ? Math.min(core.ttlMs, svc.config.ALERTS_CACHE_TTL_MS)
         : core.ttlMs
-      freshnessHeaders(res, core.cache, core.ageMs, servedTtl)
+      freshnessHeaders(res, core.cache, core.ageMs, servedTtl, freshnessScope(svc))
       if (!alertsFailed) {
         res.setHeader('X-Alerts-Age-Seconds', String(Math.floor(alerts.ageMs / 1000)))
       }
@@ -193,7 +209,7 @@ export function weatherRouter(svc: Services): Router {
         (flight) => svc.weather.currentConditions(coord(q), flight),
         { signal: scope },
       )
-      freshnessHeaders(res, entry.cache, entry.ageMs, entry.ttlMs)
+      freshnessHeaders(res, entry.cache, entry.ageMs, entry.ttlMs, freshnessScope(svc))
       res.json(entry.value)
     }),
   )
@@ -212,29 +228,37 @@ export function geocodeRouter(svc: Services): Router {
           count: z.coerce.number().int().min(1).max(25).default(12),
         }),
       )
+      // Same per-request scope as the weather routes: autocomplete taps are
+      // the most impatient calls the app makes — an upstream brownout must
+      // not pin sockets (or burn quota) for clients who already typed on.
+      const scope = upstreamScope(svc, req, res)
       // Any case fold direction is unobservable: the key is internal, and
       // both directions share entries across letter case identically.
       // Stryker disable MethodExpression: verified equivalent case-fold direction
       const key = `${q.name.toLowerCase()}|${q.count}`
       // Stryker restore MethodExpression
-      const entry = await svc.geocodeCache.getOrLoadWithMeta(key, () =>
-        svc.geocoding.search(q.name, q.count),
+      const entry = await svc.geocodeCache.getOrLoadWithMeta(
+        key,
+        (flight) => svc.geocoding.search(q.name, q.count, flight),
+        { signal: scope },
       )
       res.setHeader('X-Cache', entry.cache)
       // City identities are stable; let the app's autocomplete cache too.
-      res.setHeader('Cache-Control', 'public, max-age=300')
+      res.setHeader('Cache-Control', `${freshnessScope(svc)}, max-age=300`)
       res.json(entry.value)
     }),
   ).get(
     '/geocode/reverse',
     asyncHandler(async (req, res) => {
       const q = query(req, latLon)
+      const scope = upstreamScope(svc, req, res)
       const entry = await svc.geocodeCache.getOrLoadWithMeta(
         `rev|${coordKey(q.lat, q.lon)}`,
-        () => svc.geocoding.reverse(q.lat, q.lon),
+        (flight) => svc.geocoding.reverse(q.lat, q.lon, flight),
+        { signal: scope },
       )
       res.setHeader('X-Cache', entry.cache)
-      res.setHeader('Cache-Control', 'public, max-age=300')
+      res.setHeader('Cache-Control', `${freshnessScope(svc)}, max-age=300`)
       res.json(entry.value)
     }),
   )

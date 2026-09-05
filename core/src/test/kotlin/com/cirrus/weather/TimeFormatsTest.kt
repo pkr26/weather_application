@@ -25,6 +25,20 @@ class TimeFormatsTest {
     }
 
     @Test
+    fun `parses offset timestamps the old ISO_INSTANT path would reject`() {
+        // API 26-29's java.time throws on "+05:30"-style forms; the
+        // OffsetDateTime fallback keeps the hour instead of dropping it.
+        assertEquals(
+            Instant.parse("2026-09-03T16:30:00Z"),
+            TimeFormats.parseUtc("2026-09-03T22:00:00+05:30"),
+        )
+        assertEquals(
+            Instant.parse("2026-09-03T17:30:00Z"),
+            TimeFormats.parseUtc("2026-09-03T17:30:00+00:00"),
+        )
+    }
+
+    @Test
     fun `returns null for missing or malformed timestamps`() {
         assertNull(TimeFormats.parseUtc(null))
         assertNull(TimeFormats.parseUtc(""))

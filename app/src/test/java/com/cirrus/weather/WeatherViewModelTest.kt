@@ -119,6 +119,25 @@ class WeatherViewModelTest {
     }
 
     @Test
+    fun `a degraded bundle reaches the UI flagged`() = runTest(dispatcher) {
+        // The backend marks truncated upstream data; the app must let the
+        // UI say "limited data" instead of presenting a short forecast as
+        // complete.
+        api.behavior = { _, _ ->
+            BundleResponse(
+                currentConditions = CurrentConditionsResponse(timeZone = TimeZoneDto("Asia/Kolkata")),
+                degraded = true,
+            )
+        }
+        withViewModel { vm ->
+            vm.setCity(hyderabad)
+            runCurrent()
+            val state = vm.state.value as WeatherUiState.Ready
+            assertEquals(true, state.bundle.degraded)
+        }
+    }
+
+    @Test
     fun `setCity with the same id is a no-op`() = runTest(dispatcher) {
         withViewModel { vm ->
             vm.setCity(hyderabad)

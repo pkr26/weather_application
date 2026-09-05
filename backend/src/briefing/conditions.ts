@@ -17,6 +17,8 @@ export type ConditionKey =
   | 'condHeavySnow'
   | 'condSleet'
   | 'condHail'
+  /** A type string this build does not know (new upstream enum value). */
+  | 'condUnknown'
 
 const MAP: Record<string, ConditionKey> = {
   CLEAR: 'condClear',
@@ -67,8 +69,12 @@ const MAP: Record<string, ConditionKey> = {
 const SNOW_FAMILIES = new Set<ConditionKey>(['condSnow', 'condHeavySnow', 'condSleet'])
 
 export function conditionKey(type: string | undefined | null): ConditionKey {
+  // Absent data keeps the neutral cloudy default — an empty payload must
+  // still compose a briefing. An UNKNOWN type string is different: it is a
+  // future enum value this build has never heard of, and rendering it as
+  // "Cloudy" would assert specific weather the data never showed.
   if (!type) return 'condCloudy'
-  return MAP[type.toUpperCase()] ?? 'condCloudy'
+  return MAP[type.toUpperCase()] ?? 'condUnknown'
 }
 
 export function isSnowFamily(key: ConditionKey): boolean {

@@ -42,11 +42,14 @@ docker build -t cirrus-backend . && docker run -p 8080:8080 -e WEATHER_API_KEY=�
 Tests, type-check, mutation testing, audit:
 
 ```bash
-npm test           # vitest: 483 tests — API, security, upstream, cache,
+npm test           # vitest: 524 tests — API, security, upstream, cache,
                    # briefing engine, i18n ×27, config, store
 npm run typecheck  # tsc --noEmit
 npm run mutation   # StrykerJS mutation testing (gate: 98% of scored mutants;
-                   #   ~35% of mutants are documented equivalent-mutant ignores)
+                   #   20.8% of mutants — 335 of 1609 — are documented
+                   #   equivalent-mutant ignores; figures recomputed from
+                   #   reports/mutation/mutation.json, which predates the
+                   #   2026-09-04 fix round)
 npm run audit      # dependency audit — 0 findings
 ```
 
@@ -71,7 +74,8 @@ the city's timezone with locale-appropriate formatting via `Intl`.
 
 ```
 src/
-  index.ts            entry: env load, graceful shutdown
+  index.ts            entry: server bootstrap, graceful shutdown
+  env.ts              loads .env before anything reads process.env
   app.ts              express assembly (helmet, CORS, rate limit, pino-http)
   routes.ts           /api/v1 endpoints (zod-validated)
   config.ts           env schema, validated at boot

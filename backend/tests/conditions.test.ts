@@ -58,8 +58,16 @@ describe('conditionKey', () => {
     expect(conditionKey('Partly_Cloudy')).toBe('condPartly')
   })
 
-  it('falls back to cloudy for unknown or missing types', () => {
-    expect(conditionKey('NOT_A_THING')).toBe('condCloudy')
+  it('renders unknown future types as condUnknown — never falsely "Cloudy"', () => {
+    // A type string this build does not know is a future upstream enum
+    // value: labelling it "Cloudy" would assert weather the data never showed.
+    expect(conditionKey('NOT_A_THING')).toBe('condUnknown')
+    expect(conditionKey('SOME_FUTURE_TYPE')).toBe('condUnknown')
+  })
+
+  it('keeps the neutral cloudy default for missing data', () => {
+    // No type at all is absent data, not an unknown type — an empty payload
+    // must still compose a briefing.
     expect(conditionKey(undefined)).toBe('condCloudy')
     expect(conditionKey(null)).toBe('condCloudy')
     expect(conditionKey('')).toBe('condCloudy')

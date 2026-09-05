@@ -1,5 +1,73 @@
 # Changelog
 
+## 1.2.2 (2026-09-04) — red re-audit fixes
+
+Fixes for every finding of the third adversarial audit round
+(`AUDIT-3-2026-09-04.md`): 3 P1s, 9 P2s and the safe P3 tail. All suites
+re-verified locally on fresh runtimes (Node 22.23.2, Temurin JDK 17):
+backend 524/524 tests + typecheck + per-file coverage gate + `npm audit`
+(0 findings) + Stryker 100% (1386/1386); Android `:core:test`, `:app:testDebugUnitTest`
+(109 tests total), `:app:compileDebugKotlin`, `assembleDebug`, and PIT
+126/126 killed (100%).
+
+### Backend
+- Correctness: the pagination contract guard now covers EVERY page — a
+  shapeless later page (HTTP 200 without the list key) or a token-less
+  empty first page marks the bundle degraded instead of ending pagination
+  "healthy" and caching a truncated forecast for the full TTL.
+- Correctness: the app↔backend 401s are distinguishable — the API-token
+  gate answers `invalid_api_token`, device-secret failures `unauthorized`.
+- Resilience: geocode routes run under the per-request upstream deadline
+  with client-disconnect abort (like the weather routes); the independent
+  core+alerts fan-out now runs in parallel; an unparseable 200 body is
+  classified retryable like a 5xx; a deadline expiry maps to 504 (client
+  hang-ups stay 502); upstream bodies are read under an 8 MiB streaming
+  cap so a compromised upstream cannot OOM the process.
+- Registry: prune-on-write — a create at the cap first evicts expired
+  records, so a flooded registry self-heals without a restart; a
+  wrong-version store file is quarantined like a corrupt one instead of
+  being silently overwritten.
+- Posture: freshness headers are `private` whenever the token gate is on
+  (shared caches can no longer serve gated data tokenless); gzip runs off
+  the event loop; explicit server header/request timeouts; `API_TOKEN`
+  shorter than 16 chars fails config validation; `/health` no longer leaks
+  uptime; unknown future condition types render a neutral label in all 27
+  languages instead of a false "Cloudy"; `LOG_LEVEL` from `.env` is now
+  actually honored.
+
+### Android
+- Notifications: the boot-time reschedule consults WorkManager before
+  replacing anything — a briefing worker that cold-started the process can
+  no longer be cancelled mid-run into a dead chain (the round-3 P1); all
+  three workers keep their preferences reads inside the exception armor
+  and the DataStore has a corruption handler, so a corrupt file degrades
+  one run instead of killing the chain forever; a revoked notification
+  permission or a hard 401/403 stops the 7-fetches-per-day retry burn; a
+  briefing later than 6 h past its target is skipped as noise.
+- Device registrar: serialized (mutex) — a first-launch settings toggle can
+  no longer interleave two registrations into a mismatched identity; a
+  secret the vault failed to persist blocks identity resets (no more ghost
+  records per app open); a gate 401 (`invalid_api_token`) never resets.
+- Offline data: degraded bundles are never persisted as "last known good";
+  the last-known store writes atomically on every path.
+- UI: opening/closing the city sheet no longer wipes scroll position, row
+  expansions and entrance state (shared `SaveableStateHolder`); the
+  entrance choreography replays on a real city switch as documented; rain
+  drift follows wind updates (the frame loop no longer stale-captures its
+  first callback); flat forecast series render centered instead of pinned
+  to the floor; FOG/HAZE/MIST map to a dedicated muted archetype agreed
+  across theme/icon/fx tables (parity-pinned by tests); duplicate geocoder
+  results can no longer crash the search list; hot-path allocations
+  (per-draw Paths, per-tick colors, per-row formatters) hoisted.
+- City list: mini-card refreshes are gated on the sheet being visible —
+  a 2-hourly seen-alert write during a storm no longer triggers per-city
+  fetches with the screen off.
+- The degraded flag is now surfaced end-to-end: the app shows a "Limited
+  forecast data" banner when the backend served partial data.
+- Core: `Instant.parse` gains an offset-aware fallback (API 26-29 devices
+  no longer drop the hourly strip if upstream ever emits `+05:30`-style
+  timestamps); schedule/time naming and doc corrections.
+
 ## 1.2.1 (2026-09-04) — audit hardening
 
 Full-codebase audit fixes (see `AUDIT-2026-09-04.md` and the re-audit

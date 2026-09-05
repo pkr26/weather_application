@@ -64,6 +64,9 @@ data class BundleResponse(
     val forecastDays: ForecastDaysResponse = ForecastDaysResponse(),
     val historyHours: HistoryHoursResponse = HistoryHoursResponse(),
     val publicAlerts: PublicAlertsResponse = PublicAlertsResponse(),
+    /** Backend flag: some upstream data is missing (e.g. a truncated hourly
+     *  forecast). Defaults false for backends that predate the flag. */
+    val degraded: Boolean = false,
 )
 
 /** One entry of the backend's notification-language catalog. */

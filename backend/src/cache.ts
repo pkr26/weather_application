@@ -139,13 +139,19 @@ export class SharedScope {
   private readonly participants = new Set<AbortSignal>()
   // Stryker disable BlockStatement,CallExpression,StringLiteral: listener bookkeeping only prevents leaks — its absence is unobservable in-process; the abort semantics are pinned by the scope tests
   private readonly onParticipantAbort = (): void => {
-    for (const s of [...this.participants]) {
-      if (s.aborted) {
-        this.participants.delete(s)
-        s.removeEventListener('abort', this.onParticipantAbort)
-      }
+    // Snapshot + filter: participants abort one event at a time, but the
+    // handler must also sweep any that aborted while an earlier event ran.
+    const aborted = [...this.participants].filter((s) => s.aborted)
+    let reason: unknown
+    for (const s of aborted) {
+      this.participants.delete(s)
+      s.removeEventListener('abort', this.onParticipantAbort)
+      reason = s.reason
     }
-    if (this.participants.size === 0) this.controller.abort()
+    // Re-abort the flight controller with the departing participant's
+    // reason (e.g. the request deadline's TimeoutError) so the HTTP layer
+    // can distinguish a deadline expiry from a client hang-up downstream.
+    if (this.participants.size === 0) this.controller.abort(reason)
   }
   // Stryker restore BlockStatement,CallExpression,StringLiteral
 

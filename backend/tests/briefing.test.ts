@@ -195,6 +195,20 @@ describe('generateBriefing', () => {
     expect(result.highC).toBeNull()
   })
 
+  it('renders the neutral unknown label for a future condition type', () => {
+    // An unrecognized enum value must not claim "Cloudy" — that would assert
+    // specific weather the upstream never reported.
+    const result = generateBriefing({
+      bundle: makeBundle({ conditionType: 'SOME_FUTURE_TYPE' }),
+      city: 'Testville',
+      pack: resolvePack('en'),
+      units: 'metric',
+      now: NOW,
+    })
+    expect(result.condition).toBe(en.t.condUnknown)
+    expect(result.condition).not.toBe(en.t.condCloudy)
+  })
+
   it('does not throw for hours outside today (keeps first 16 as fallback)', () => {
     const bundle = makeBundle()
     // Shift all hours to tomorrow.

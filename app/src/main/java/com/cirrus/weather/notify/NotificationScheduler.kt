@@ -8,6 +8,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import java.time.LocalDateTime
@@ -32,6 +33,24 @@ object NotificationScheduler {
 
     /** Marks a run as the connectivity catch-up (exhausted-retries) variant. */
     const val KEY_CATCHUP = "catchup"
+
+    /** Decision matrix for the boot-time reschedule (see [bootAction]). */
+    enum class BootAction {
+        /** A briefing worker is running right now — leave it alone; it
+         *  reschedules itself when it finishes. */
+        RUNNER_ACTIVE,
+
+        /** A run is already enqueued — it carries today's/tomorrow's
+         *  schedule; replacing it could only delay the next briefing. */
+        PENDING_EXISTS,
+
+        /** Nothing armed and today's target already passed unposted — arm
+         *  the connectivity catch-up and schedule the next occurrence. */
+        ARM_CATCH_UP_AND_SCHEDULE,
+
+        /** Nothing armed, today not missed — just schedule the next run. */
+        SCHEDULE_ONLY,
+    }
 
     /** Connectivity is the one thing every notification run needs. */
     private val online = Constraints.Builder()
@@ -73,10 +92,18 @@ object NotificationScheduler {
 
     /**
      * Boot / timezone-change reschedule. A plain REPLACE would silently kill
-     * today's still-pending briefing (its CONNECTED constraint unmet while
-     * the device was offline) and jump straight to tomorrow — so when the
-     * target time has already passed today and nothing was posted yet, a
-     * catch-up run is armed to fire the moment connectivity returns.
+     * today's still-pending briefing (its CONNECTED constraint unmet while the
+     * device was offline) and jump straight to tomorrow — so when the target
+     * time has already passed today and nothing was posted yet, a catch-up
+     * run is armed to fire the moment connectivity returns.
+     *
+     * The chain's own state is consulted first: WorkManager often
+     * cold-starts the process *for* the briefing worker itself, and an
+     * unconditional schedule from Application.onCreate would then REPLACE
+     * that very worker mid-run — cancelling today's briefing and leaving a
+     * dead chain that nothing ever revives. A RUNNING worker reschedules
+     * itself; a pending ENQUEUED run already carries today's (or tomorrow's)
+     * schedule, and replacing it could only push the next briefing out.
      */
     fun bootReschedule(context: Context, timeMinutes: Int, lastPostedAtMs: Long) {
         val now = LocalDateTime.now()
@@ -88,9 +115,40 @@ object NotificationScheduler {
             lastPostedAtMs > 0 &&
                 System.currentTimeMillis() - lastPostedAtMs < RECENT_BRIEFING_WINDOW_MS
         val missedToday = now.isAfter(target) && !postedRecently
-        if (missedToday) scheduleBriefingCatchUp(context)
-        scheduleDailyBriefing(context, timeMinutes)
+        val states = chainStates(context)
+        when (bootAction(missedToday, states.contains(WorkInfo.State.RUNNING), states.contains(WorkInfo.State.ENQUEUED))) {
+            BootAction.RUNNER_ACTIVE -> return
+            BootAction.PENDING_EXISTS -> return
+            BootAction.ARM_CATCH_UP_AND_SCHEDULE -> {
+                scheduleBriefingCatchUp(context)
+                scheduleDailyBriefing(context, timeMinutes, ExistingWorkPolicy.KEEP)
+            }
+            BootAction.SCHEDULE_ONLY ->
+                scheduleDailyBriefing(context, timeMinutes, ExistingWorkPolicy.KEEP)
+        }
     }
+
+    /** What a boot-time reschedule should do given the chain's live state.
+     *  Pure so the decision matrix is unit-testable without WorkManager. */
+    fun bootAction(missedToday: Boolean, anyRunning: Boolean, anyEnqueued: Boolean): BootAction =
+        when {
+            anyRunning -> BootAction.RUNNER_ACTIVE
+            anyEnqueued -> BootAction.PENDING_EXISTS
+            missedToday -> BootAction.ARM_CATCH_UP_AND_SCHEDULE
+            else -> BootAction.SCHEDULE_ONLY
+        }
+
+    /** Current states of the briefing chain; empty when WorkManager cannot
+     *  answer (treated as "nothing scheduled" by the caller). Blocking by
+     *  design — every call site is already on a background dispatcher. */
+    private fun chainStates(context: Context): Set<WorkInfo.State> =
+        runCatching {
+            WorkManager.getInstance(context)
+                .getWorkInfosForUniqueWork(BRIEFING_CHAIN)
+                .get()
+                .mapNotNull { it?.state }
+                .toSet()
+        }.getOrDefault(emptySet())
 
     /**
      * Fires the briefing as soon as connectivity returns — used when the

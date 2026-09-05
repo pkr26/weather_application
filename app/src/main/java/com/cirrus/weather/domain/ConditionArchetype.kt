@@ -67,45 +67,70 @@ object ConditionThemes {
     val THUNDER_DAY = day(0xFF1A1F3A, 0xFF272E52, 0xFF3A4270, Fx.STORM)
     val THUNDER_NIGHT = night(0xFF080B1D, 0xFF101430, 0xFF1B2245, Fx.STORM)
 
+    // Fog family (FOG/HAZE/MIST): near-flat neutral greys with deliberately
+    // low contrast between stops, and NO particles — fog reads as murk, not
+    // as weather in motion. Muted relative to CLOUDY so it never reads as
+    // rain-adjacent.
+    val FOG_DAY = day(0xFF79838C, 0xFF8A939B, 0xFF9CA4AB)
+    val FOG_NIGHT = night(0xFF1C2026, 0xFF242930, 0xFF2D333B)
+
     val FALLBACK_DAY = CLOUDY_DAY
     val FALLBACK_NIGHT = CLOUDY_NIGHT
 
-    fun archetypeFor(conditionType: String?, isDaytime: Boolean): Archetype {
-        val (dayA, nightA) = when (conditionType?.uppercase()) {
-            "CLEAR" -> CLEAR_DAY to CLEAR_NIGHT
-            "MOSTLY_CLEAR" -> CLEAR_DAY to CLEAR_NIGHT
-            "PARTLY_CLOUDY" -> PARTLY_DAY to PARTLY_NIGHT
-            "MOSTLY_CLOUDY" -> CLOUDY_DAY to CLOUDY_NIGHT
-
-            "CLOUDY" -> CLOUDY_DAY to CLOUDY_NIGHT
-            "WINDY" -> WINDY_DAY to WINDY_NIGHT
-            "WIND_AND_RAIN" -> RAIN_DAY to RAIN_NIGHT
-
-            "LIGHT_RAIN_SHOWERS", "CHANCE_OF_SHOWERS", "SCATTERED_SHOWERS",
-            "LIGHT_RAIN", "LIGHT_TO_MODERATE_RAIN" -> LIGHT_RAIN_DAY to LIGHT_RAIN_NIGHT
-
-            "RAIN_SHOWERS", "RAIN", "MODERATE_TO_HEAVY_RAIN",
-            "RAIN_PERIODICALLY_HEAVY" -> RAIN_DAY to RAIN_NIGHT
-
-            "HEAVY_RAIN_SHOWERS", "HEAVY_RAIN" -> HEAVY_RAIN_DAY to HEAVY_RAIN_NIGHT
-
-            "LIGHT_SNOW_SHOWERS", "CHANCE_OF_SNOW_SHOWERS", "SCATTERED_SNOW_SHOWERS",
-            "LIGHT_SNOW", "LIGHT_TO_MODERATE_SNOW" -> LIGHT_SNOW_DAY to LIGHT_SNOW_NIGHT
-
-            "SNOW_SHOWERS", "SNOW", "MODERATE_TO_HEAVY_SNOW",
-            "SNOW_PERIODICALLY_HEAVY", "SNOWSTORM" -> SNOW_DAY to SNOW_NIGHT
-
-            "HEAVY_SNOW_SHOWERS", "HEAVY_SNOW", "HEAVY_SNOW_STORM",
-            "BLOWING_SNOW" -> SNOW_DAY to SNOW_NIGHT
-
-            "RAIN_AND_SNOW" -> SLEET_DAY to SLEET_NIGHT
-            "HAIL", "HAIL_SHOWERS" -> HAIL_DAY to HAIL_NIGHT
-
-            "THUNDERSTORM", "THUNDERSHOWER", "LIGHT_THUNDERSTORM_RAIN",
-            "SCATTERED_THUNDERSTORMS", "HEAVY_THUNDERSTORM" -> THUNDER_DAY to THUNDER_NIGHT
-
-            else -> FALLBACK_DAY to FALLBACK_NIGHT
+    // The condition table lives in a Map (not a `when`) so its key set is
+    // introspectable: KNOWN_CONDITIONS is the coverage contract that the icon
+    // table is pinned against in ConditionThemesTest — the two tables drifted
+    // before (FOG/HAZE/MIST arrived backend-side with no app branch).
+    private val CONDITION_ARCHETYPES: Map<String, Pair<Archetype, Archetype>> = buildMap {
+        fun archetypes(vararg types: String, day: Archetype, night: Archetype) {
+            types.forEach { put(it, day to night) }
         }
+        archetypes("CLEAR", "MOSTLY_CLEAR", day = CLEAR_DAY, night = CLEAR_NIGHT)
+        archetypes("PARTLY_CLOUDY", day = PARTLY_DAY, night = PARTLY_NIGHT)
+        archetypes("MOSTLY_CLOUDY", "CLOUDY", day = CLOUDY_DAY, night = CLOUDY_NIGHT)
+        archetypes("FOG", "HAZE", "MIST", day = FOG_DAY, night = FOG_NIGHT)
+        archetypes("WINDY", day = WINDY_DAY, night = WINDY_NIGHT)
+        archetypes("WIND_AND_RAIN", day = RAIN_DAY, night = RAIN_NIGHT)
+        archetypes(
+            "LIGHT_RAIN_SHOWERS", "CHANCE_OF_SHOWERS", "SCATTERED_SHOWERS",
+            "LIGHT_RAIN", "LIGHT_TO_MODERATE_RAIN",
+            day = LIGHT_RAIN_DAY, night = LIGHT_RAIN_NIGHT,
+        )
+        archetypes(
+            "RAIN_SHOWERS", "RAIN", "MODERATE_TO_HEAVY_RAIN", "RAIN_PERIODICALLY_HEAVY",
+            day = RAIN_DAY, night = RAIN_NIGHT,
+        )
+        archetypes("HEAVY_RAIN_SHOWERS", "HEAVY_RAIN", day = HEAVY_RAIN_DAY, night = HEAVY_RAIN_NIGHT)
+        archetypes(
+            "LIGHT_SNOW_SHOWERS", "CHANCE_OF_SNOW_SHOWERS", "SCATTERED_SNOW_SHOWERS",
+            "LIGHT_SNOW", "LIGHT_TO_MODERATE_SNOW",
+            day = LIGHT_SNOW_DAY, night = LIGHT_SNOW_NIGHT,
+        )
+        archetypes(
+            "SNOW_SHOWERS", "SNOW", "MODERATE_TO_HEAVY_SNOW", "SNOW_PERIODICALLY_HEAVY",
+            "SNOWSTORM", "HEAVY_SNOW_SHOWERS", "HEAVY_SNOW", "HEAVY_SNOW_STORM", "BLOWING_SNOW",
+            day = SNOW_DAY, night = SNOW_NIGHT,
+        )
+        archetypes("RAIN_AND_SNOW", day = SLEET_DAY, night = SLEET_NIGHT)
+        archetypes("HAIL", "HAIL_SHOWERS", day = HAIL_DAY, night = HAIL_NIGHT)
+        archetypes(
+            "THUNDERSTORM", "THUNDERSHOWER", "LIGHT_THUNDERSTORM_RAIN",
+            "SCATTERED_THUNDERSTORMS", "HEAVY_THUNDERSTORM",
+            day = THUNDER_DAY, night = THUNDER_NIGHT,
+        )
+    }
+
+    /**
+     * Every condition string with an explicit archetype branch. Mirrors the
+     * backend's condition table (backend/src/briefing/conditions.ts); a
+     * string the backend can send that is missing here silently renders as
+     * the fallback — ConditionThemesTest pins the two against each other.
+     */
+    val KNOWN_CONDITIONS: Set<String> = CONDITION_ARCHETYPES.keys
+
+    fun archetypeFor(conditionType: String?, isDaytime: Boolean): Archetype {
+        val (dayA, nightA) = CONDITION_ARCHETYPES[conditionType?.uppercase()]
+            ?: (FALLBACK_DAY to FALLBACK_NIGHT)
         return if (isDaytime) dayA else nightA
     }
 }

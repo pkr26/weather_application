@@ -15,6 +15,10 @@ export default defineConfig({
         // Server bootstrap: binds a port and installs signal handlers —
         // exercised by the Docker healthcheck, not unit-testable.
         'src/index.ts',
+        // Pre-app env bootstrap: importing it from the suite would couple
+        // tests to the developer machine's backend/.env (excluded for the
+        // same bootstrap reason as index.ts).
+        'src/env.ts',
       ],
       // Every file must clear 98% on lines, branches, functions and
       // statements — aggregate numbers hide files the suite forgot.

@@ -11,6 +11,9 @@ import com.cirrus.weather.data.remote.dto.PublicAlertsResponse
 import com.cirrus.weather.data.remote.dto.WeatherAlertDto
 import com.cirrus.weather.domain.SavedCity
 import kotlinx.coroutines.flow.first
+import retrofit2.HttpException
+import java.time.Duration
+import java.time.LocalDateTime
 
 /**
  * Shared lookup: the city notifications are about — the active city, else
@@ -140,41 +143,68 @@ class BriefingWorker(appContext: Context, params: WorkerParameters) :
 
     override suspend fun doWork(): Result {
         val container = (applicationContext as CirrusApp).container
-        if (!container.settings.notificationsEnabled.first()) {
-            return Result.success() // user turned notifications off since scheduling
-        }
-        if (container.activeCity() == null) {
-            // Nothing to brief about — but the chain must stay armed for the
-            // day the user adds a city again, without relying on the next
-            // process start to re-arm it.
-            NotificationScheduler.scheduleDailyBriefing(
-                applicationContext,
-                container.settings.notificationTimeMinutes.first(),
-                ExistingWorkPolicy.APPEND_OR_REPLACE,
-            )
+        // Armor starts before the first preferences read: an unreadable
+        // DataStore must degrade this one run, not throw the worker into
+        // FAILURE and take the whole chain (and its reschedules) with it.
+        val timeMinutes = try {
+            container.settings.notificationTimeMinutes.first()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Preferences unavailable (corruption/disk): there is nothing to
+            // compute a schedule from — the next process start re-arms.
             return Result.success()
         }
         val isCatchUp = inputData.getBoolean(NotificationScheduler.KEY_CATCHUP, false)
 
-        return try {
-            val posted = container.briefingUseCase.post()
-            if (posted) {
-                if (rescheduleAfterPost(isCatchUp)) {
-                    NotificationScheduler.scheduleDailyBriefing(
-                        applicationContext,
-                        container.settings.notificationTimeMinutes.first(),
-                        ExistingWorkPolicy.APPEND_OR_REPLACE,
-                    )
-                }
-                Result.success()
-            } else {
-                retryOrGiveUp(container, isCatchUp)
+        // A briefing many hours after its target is noise, not information:
+        // an all-day airplane-mode morning would otherwise post "good
+        // morning" at 22:00 with long-stale content.
+        if (isTooLateToPost(LocalDateTime.now(), timeMinutes)) {
+            return skipToday(timeMinutes, isCatchUp)
+        }
+
+        val posted = try {
+            if (!container.settings.notificationsEnabled.first()) {
+                return Result.success() // user turned notifications off since scheduling
             }
+            if (container.activeCity() == null) {
+                // Nothing to brief about — but the chain must stay armed for the
+                // day the user adds a city again, without relying on the next
+                // process start to re-arm it.
+                NotificationScheduler.scheduleDailyBriefing(
+                    applicationContext,
+                    timeMinutes,
+                    ExistingWorkPolicy.APPEND_OR_REPLACE,
+                )
+                return Result.success()
+            }
+            container.briefingUseCase.post()
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e // cancellation must propagate, never masquerade as failure
-        } catch (_: Exception) {
-            retryOrGiveUp(container, isCatchUp)
+        } catch (e: Exception) {
+            // Auth is broken server-side (rotated token/secret): retries can
+            // only burn fetches. Keep tomorrow armed and give up on today.
+            if (e is HttpException && (e.code() == 401 || e.code() == 403)) {
+                return skipToday(timeMinutes, isCatchUp)
+            }
+            return retryOrGiveUp(isCatchUp, timeMinutes)
         }
+
+        if (posted) {
+            if (rescheduleAfterPost(isCatchUp)) {
+                NotificationScheduler.scheduleDailyBriefing(
+                    applicationContext,
+                    timeMinutes,
+                    ExistingWorkPolicy.APPEND_OR_REPLACE,
+                )
+            }
+            return Result.success()
+        }
+        // post()==false here can only mean the notification itself was
+        // refused (POST_NOTIFICATIONS revoked): retrying a fetch cannot fix
+        // a permission. Tomorrow retries naturally if the user re-grants.
+        return skipToday(timeMinutes, isCatchUp)
     }
 
     companion object {
@@ -185,9 +215,32 @@ class BriefingWorker(appContext: Context, params: WorkerParameters) :
          * APPEND from the catch-up would duplicate every future morning.
          */
         fun rescheduleAfterPost(isCatchUp: Boolean): Boolean = !isCatchUp
+
+        /** A briefing later than this many hours past today's target is
+         *  skipped outright — see the call site for why. */
+        const val MAX_LATE_HOURS = 6L
+
+        fun isTooLateToPost(now: LocalDateTime, timeMinutes: Int): Boolean {
+            val target = now.toLocalDate().atTime(timeMinutes / 60, timeMinutes % 60)
+            return Duration.between(target, now) > Duration.ofHours(MAX_LATE_HOURS)
+        }
     }
 
-    private suspend fun retryOrGiveUp(container: com.cirrus.weather.di.AppContainer, isCatchUp: Boolean): Result {
+    /** Gives up on today's briefing while keeping tomorrow armed (the
+     *  catch-up never appends: the chain already owns tomorrow by the time
+     *  one exists). */
+    private fun skipToday(timeMinutes: Int, isCatchUp: Boolean): Result {
+        if (!isCatchUp) {
+            NotificationScheduler.scheduleDailyBriefing(
+                applicationContext,
+                timeMinutes,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+            )
+        }
+        return Result.success()
+    }
+
+    private fun retryOrGiveUp(isCatchUp: Boolean, timeMinutes: Int): Result {
         if (runAttemptCount < 3) return Result.retry()
         if (isCatchUp) return Result.success() // catch-up already exhausted its chances
         // Backend unreachable all morning: post as soon as connectivity
@@ -195,7 +248,7 @@ class BriefingWorker(appContext: Context, params: WorkerParameters) :
         NotificationScheduler.scheduleBriefingCatchUp(applicationContext)
         NotificationScheduler.scheduleDailyBriefing(
             applicationContext,
-            container.settings.notificationTimeMinutes.first(),
+            timeMinutes,
             ExistingWorkPolicy.APPEND_OR_REPLACE,
         )
         return Result.success()
@@ -212,9 +265,11 @@ class AlertWorker(appContext: Context, params: WorkerParameters) :
 
     override suspend fun doWork(): Result {
         val container = (applicationContext as CirrusApp).container
-        if (!container.settings.notificationsEnabled.first()) return Result.success()
-
         return try {
+            // The preferences read lives inside the armor: an unreadable
+            // DataStore is a transient infra failure, not a reason to kill
+            // the periodic work.
+            if (!container.settings.notificationsEnabled.first()) return Result.success()
             container.alertUseCase.poll()
             Result.success()
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -248,14 +303,22 @@ class RescheduleWorker(appContext: Context, params: WorkerParameters) :
 
     override suspend fun doWork(): Result {
         val container = (applicationContext as CirrusApp).container
-        // Mirror the boot path: a clock change for a user who turned
-        // notifications off must not re-arm anything.
-        if (!container.settings.notificationsEnabled.first()) return Result.success()
-        NotificationScheduler.bootReschedule(
-            applicationContext,
-            container.settings.notificationTimeMinutes.first(),
-            container.settings.lastBriefingPostedAt.first(),
-        )
-        return Result.success()
+        return try {
+            // Mirror the boot path: a clock change for a user who turned
+            // notifications off must not re-arm anything.
+            if (!container.settings.notificationsEnabled.first()) return Result.success()
+            NotificationScheduler.bootReschedule(
+                applicationContext,
+                container.settings.notificationTimeMinutes.first(),
+                container.settings.lastBriefingPostedAt.first(),
+            )
+            Result.success()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Preferences unavailable: nothing to re-anchor against — the
+            // next process start re-syncs the schedule.
+            Result.success()
+        }
     }
 }

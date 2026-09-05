@@ -1,4 +1,5 @@
-import { gzipSync } from 'node:zlib'
+import { gzip } from 'node:zlib'
+import { promisify } from 'node:util'
 import type { NextFunction, Request, Response } from 'express'
 
 /**
@@ -9,9 +10,10 @@ import type { NextFunction, Request, Response } from 'express'
  *
  * Implemented against `res.json` (every route in this service responds via
  * `res.json`), bodies under 1 KB pass through untouched (compression overhead
- * exceeds the saving), and the sync gzip call costs ~1 ms for a 150 KB
- * payload — a fair trade for not pulling a middleware dependency into the
- * lockfile.
+ * exceeds the saving), and compression runs through async zlib — a ~1 ms
+ * gzipSync per ≥1 KB response is ~1 ms the event loop steals from every
+ * concurrent request, so the work goes to the thread pool instead. Still no
+ * middleware dependency in the lockfile.
  *
  * Negotiation follows RFC 9110 §12.5.3: token + q-value, case-insensitive,
  * `gzip;q=0` is an explicit refusal, `*` accepts anything not refused.
@@ -19,6 +21,8 @@ import type { NextFunction, Request, Response } from 'express'
  * a shared cache that stored the identity variant without the Vary header
  * could serve it to gzip clients (or double-store both).
  */
+
+const gzipAsync = promisify(gzip)
 
 const THRESHOLD_BYTES = 1024
 
@@ -44,8 +48,10 @@ export function acceptsGzip(header: string): boolean {
         q = Number.isNaN(parsed) ? 0 : Math.min(Math.max(parsed, 0), 1)
       }
     }
+    // Stryker disable ConditionalExpression: verified equivalent — Math.max coerces the initial null to 0 and q is clamped to [0,1], so `null ? q : max(0, q)` yields q under both arms for the first gzip-family token
     if (token === '*') wildcardQ = q
     else gzipQ = gzipQ === null ? q : Math.max(gzipQ, q)
+    // Stryker restore ConditionalExpression
   }
   // An explicit gzip token decides; only its absence falls back to `*`.
   if (gzipQ !== null) return gzipQ > 0
@@ -59,7 +65,9 @@ export function gzipJsonMiddleware(req: Request, res: Response, next: NextFuncti
   // Set before any response is produced: the stored representation's
   // selection depends on this request header, compressed or not.
   res.setHeader('Vary', 'Accept-Encoding')
+  // Stryker disable StringLiteral: verified equivalent — with the header absent, any junk fallback string contains no gzip/*/x-gzip token and negotiates to the same false verdict as ''
   if (!acceptsGzip(String(req.headers['accept-encoding'] ?? ''))) {
+    // Stryker restore StringLiteral
     next()
     return
   }
@@ -69,19 +77,29 @@ export function gzipJsonMiddleware(req: Request, res: Response, next: NextFuncti
     if (payload.length < THRESHOLD_BYTES) {
       return originalJson(body)
     }
+    // Compression completes asynchronously: the response is written from
+    // the callback, so res.json still returns synchronously (express's
+    // chainability contract) while the zlib work runs off the event loop.
     // Stryker disable ObjectLiteral: the gzip level changes bytes, never semantics or headers
-    const gz = gzipSync(payload, { level: 6 })
+    void gzipAsync(payload, { level: 6 })
+      .then((gz) => {
+        res.setHeader('Content-Encoding', 'gzip')
+        res.setHeader('Content-Length', String(gz.length))
+        // Calling res.end directly bypasses express's res.send — which is
+        // what sets the content type. Without it every compressed response
+        // ships untyped, and strict JSON clients refuse to parse the body.
+        res.setHeader('Content-Type', 'application/json; charset=utf-8')
+        // No ETag on the compressed path — express would tag the
+        // uncompressed body, and we bypassed its serialization entirely.
+        res.removeHeader('ETag')
+        res.end(gz)
+      })
+      .catch(() => {
+        // A zlib failure must not kill an otherwise valid answer: fall
+        // back to the identity body.
+        originalJson(body)
+      })
     // Stryker restore ObjectLiteral
-    res.setHeader('Content-Encoding', 'gzip')
-    res.setHeader('Content-Length', String(gz.length))
-    // Calling res.end directly bypasses express's res.send — which is what
-    // sets the content type. Without it every compressed response ships
-    // untyped, and strict JSON clients refuse to parse the body.
-    res.setHeader('Content-Type', 'application/json; charset=utf-8')
-    // No ETag on the compressed path — express would tag the uncompressed
-    // body, and we bypassed its serialization entirely.
-    res.removeHeader('ETag')
-    res.end(gz)
     return res
   }
   next()

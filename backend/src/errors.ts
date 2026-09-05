@@ -28,6 +28,13 @@ export class UpstreamError extends AppError {
     readonly retryAfterMs?: number,
     /** The hint to FORWARD to clients — the upstream's uncapped ask. */
     readonly forwardRetryAfterMs?: number,
+    /**
+     * Which side killed an aborted call. 'deadline' means OUR whole-request
+     * budget fired — reported to clients as 504 Gateway Timeout (retrying
+     * now would only hit the same deadline); 'client' means the caller hung
+     * up, where nobody reads the status anyway.
+     */
+    readonly abortedBy?: 'deadline' | 'client',
   ) {
     super(502, message, 'upstream_error')
     this.name = 'UpstreamError'
@@ -69,6 +76,18 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
       // clients get a stable, non-revealing message.
       logger.error({ err }, err.message)
       if (err instanceof UpstreamError) {
+        if (err.abortedBy === 'deadline') {
+          // Our own whole-request budget fired (not the upstream, not the
+          // client): 504 says exactly that, and no Retry-After is attached —
+          // the deadline is not the upstream's backoff instruction, and an
+          // immediate client retry with a fresh budget is legitimate.
+          res.status(504).json({
+            // UpstreamError always carries this code — no fallback branch.
+            error: 'upstream_error',
+            message: 'Upstream weather service did not answer in time. Try again shortly.',
+          })
+          return
+        }
         // Throttling and maintenance are the two "come back later" answers:
         // say 503 (not 502) and pass the upstream's own Retry-After through
         // so well-behaved clients back off instead of hammering.

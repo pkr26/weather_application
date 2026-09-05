@@ -142,6 +142,31 @@ describe('loadConfig', () => {
     }
   })
 
+  it('rejects an API_TOKEN shorter than 16 characters (empty stays open)', () => {
+    // A short gate token is brute-forceable within request budgets — a gate
+    // in name only. Empty keeps the open-API configuration.
+    resetConfigCache()
+    expect(() =>
+      loadConfig({ WEATHER_API_KEY: 'k', API_TOKEN: 'short-token' } as NodeJS.ProcessEnv),
+    ).toThrow(/API_TOKEN must be at least 16 characters/)
+    resetConfigCache()
+    expect(loadConfig({ WEATHER_API_KEY: 'k', API_TOKEN: '' } as NodeJS.ProcessEnv).API_TOKEN).toBe('')
+    // The minimum is inclusive: exactly 16 is a valid gate, 15 is not.
+    resetConfigCache()
+    expect(loadConfig({ WEATHER_API_KEY: 'k', API_TOKEN: 'abcdefghijklmnop' } as NodeJS.ProcessEnv).API_TOKEN).toBe(
+      'abcdefghijklmnop',
+    )
+    resetConfigCache()
+    expect(() =>
+      loadConfig({ WEATHER_API_KEY: 'k', API_TOKEN: 'abcdefghijklmno' } as NodeJS.ProcessEnv),
+    ).toThrow(/API_TOKEN must be at least 16 characters/)
+    resetConfigCache()
+    expect(
+      loadConfig({ WEATHER_API_KEY: 'k', API_TOKEN: 'a-gate-token-16-chars' } as NodeJS.ProcessEnv)
+        .API_TOKEN,
+    ).toBe('a-gate-token-16-chars')
+  })
+
   it('caches the parsed config until reset', () => {
     const first = loadConfig({ WEATHER_API_KEY: 'k' } as NodeJS.ProcessEnv)
     const second = loadConfig({ WEATHER_API_KEY: 'other' } as NodeJS.ProcessEnv)

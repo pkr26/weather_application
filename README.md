@@ -75,7 +75,7 @@ and Gemini).
   redaction in logs, clean JSON error envelope, graceful shutdown, Dockerfile.
   See [SECURITY.md](SECURITY.md) for the full threat model and
   control-to-test matrix.
-- **483 tests** (per-file coverage gated at 98%) plus **mutation testing
+- **524 tests** (per-file coverage gated at 98%) plus **mutation testing
   (StrykerJS — the build breaks below 98% of scored mutants)** and a
   zero-finding `npm audit` — see [TESTING.md](TESTING.md).
 
@@ -103,8 +103,10 @@ and Gemini).
    # physical device: http://<your-LAN-IP>:8080/api/v1/
    ```
 
-   Cleartext HTTP is allowed only for local dev addresses via the network
-   security config; point `API_BASE_URL` at HTTPS for production.
+   Release builds permit **no** cleartext HTTP at all (the network security
+   config refuses it) — point `API_BASE_URL` at HTTPS for production. Debug
+   builds allow cleartext to any host for physical-device testing; never
+   ship a debug build.
 
 3. **Notifications**: in the app, open the city list (top-left) → ⚙️ →
    enable the daily briefing, pick a language (try Telugu हिंदी العربية 中文…),
@@ -122,7 +124,7 @@ API) and put it in `backend/.env` — the Android app needs no key at all.
 ```bash
 # Backend (Node 22+)
 cd backend
-npm test            # 483 tests: API surface, security, upstream resilience,
+npm test            # 524 tests: API surface, security, upstream resilience,
                     # briefing engine (27 languages), cache, store, config,
                     # log content, graceful-shutdown integration
 npm run typecheck
@@ -172,8 +174,12 @@ app/src/main/java/com/cirrus/weather/
   `API_BASE_URL` is missing from `local.properties`, `assembleRelease`
   fails fast instead of producing an APK that can only talk to
   `10.0.2.2`. Debug builds keep the convenient loopback default, and
-  debug network config additionally allows cleartext to any LAN address
-  for physical-device testing.
+  debug network config allows cleartext to **any** host (not just LAN
+  addresses) for physical-device testing — release config allows none.
+- **On-screen condition text is English** even when notifications are in
+  another language: core weather is cached once per location and shared by
+  all 27 languages server-side (only alert text is fetched per language),
+  so the hero/hourly descriptions arrive in English by design.
 - Weather data is informational and is **not** an official severe-weather
   warning source — always defer to local authorities (alerts come from the
   API's `publicAlerts` endpoint, re-checked every 2 hours).

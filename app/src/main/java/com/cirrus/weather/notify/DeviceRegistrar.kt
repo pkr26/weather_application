@@ -7,6 +7,12 @@ import com.cirrus.weather.data.remote.dto.DeviceRegistrationResponse
 import com.cirrus.weather.data.remote.dto.NotificationTimeRequest
 import com.cirrus.weather.domain.SavedCity
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import retrofit2.HttpException
 
 /**
@@ -53,28 +59,62 @@ class DeviceRegistrar(
         suspend fun alertsEnabled(): Boolean
     }
 
+    // register() is called from Application.onCreate AND every settings
+    // toggle; without serialization two first-launch callers can interleave
+    // their reset/re-mint cycles into a permanently mismatched id/secret pair.
+    private val registerMutex = Mutex()
+
+    // Set while the keystore vault refuses to persist secrets: identity
+    // resets are pointless until a secret can actually be stored — each one
+    // would only mint another orphan server record on the next app open.
+    private var vaultBroken = false
+
+    private val json = Json { ignoreUnknownKeys = true }
+
     suspend fun register() {
+        registerMutex.withLock {
+            try {
+                doRegister()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: HttpException) {
+                handleUnauthorized(e)
+            } catch (_: Exception) {
+                // Best-effort sync; retried on next app open / settings change.
+            }
+        }
+    }
+
+    /**
+     * A 401 means "this identity is no longer accepted" ONLY when the server
+     * is rejecting the *device secret*. The backend distinguishes its two
+     * 401s (`unauthorized` vs `invalid_api_token`): a gate failure can never
+     * be fixed by resetting the identity, and resetting anyway would mint a
+     * ghost record per app open until the registry fills.
+     */
+    private suspend fun handleUnauthorized(e: HttpException) {
+        if (e.code() != 401 || vaultBroken || !e.isDeviceIdentityRejection()) return
+        // The server no longer accepts this identity (registry rebuilt /
+        // record pruned): mint a fresh one, register once.
+        identity.reset()
         try {
             doRegister()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: HttpException) {
-            if (e.code() == 401) {
-                // The server no longer accepts this identity (registry
-                // rebuilt / record pruned): mint a fresh one, register once.
-                identity.reset()
-                try {
-                    doRegister()
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (_: Exception) {
-                    // Best-effort sync; retried on next app open.
-                }
-            }
-            // Other HTTP errors follow the same best-effort policy as below.
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (_: Exception) {
-            // Best-effort sync; retried on next app open / settings change.
+            // Best-effort sync; retried on next app open.
         }
+    }
+
+    private fun HttpException.isDeviceIdentityRejection(): Boolean {
+        // Unreadable/absent bodies keep the historical behavior (reset):
+        // older backends only ever said plain "unauthorized" here.
+        val body = runCatching { response()?.errorBody()?.string() }.getOrNull()
+            ?: return true
+        val code = runCatching {
+            json.parseToJsonElement(body).jsonObject["error"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull()
+        return code == null || code == "unauthorized"
     }
 
     private suspend fun doRegister(): DeviceRegistrationResponse? {
@@ -101,7 +141,12 @@ class DeviceRegistrar(
             // instead of a fresh registration on every app open.
             deviceSecret = identity.secret(),
         )
-        response.deviceSecret?.let { identity.storeSecret(it) }
+        // A secret the vault refused to persist is unusable: remembering it
+        // as stored would 401 forever, so the failure flag stays set and
+        // blocks identity resets until the vault works again.
+        response.deviceSecret?.let { secret ->
+            vaultBroken = !identity.storeSecret(secret)
+        }
         return response
     }
 }

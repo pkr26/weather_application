@@ -4,9 +4,9 @@ Three layers, each answering a different question:
 
 | Layer | Question it answers | Tool | Status |
 |-------|--------------------|------|--------|
-| **Unit & integration tests** | Does the code do what it should? | Vitest (backend, **483 tests**), JUnit4 (Android `core` + app, **91 tests**) | all green |
+| **Unit & integration tests** | Does the code do what it should? | Vitest (backend, **524 tests**), JUnit4 (Android `core` + app, **109 tests**) | all green |
 | **Per-file coverage gate** | Did the suite forget a file? | Vitest + istanbul, **98% lines/branches/functions/statements per file** | enforced in CI (`npm run test:coverage`) |
-| **Mutation testing** | Do the tests actually *catch* bugs — would they fail if the logic were broken? | StrykerJS (backend, **last full run: 99.1%, break below 98**), PIT (Kotlin core, **last full run: 100%, thresholds at 98**) | enforced in CI |
+| **Mutation testing** | Do the tests actually *catch* bugs — would they fail if the logic were broken? | StrykerJS (backend, **last full run: 100% — 1386/1386 scored mutants killed, 2026-09-04, break below 98**), PIT (Kotlin core, **last full run: 100% — 126/126 killed, 2026-09-04, thresholds at 98**) | enforced in CI |
 | **Dependency audit** | Do we ship known-vulnerable code? | `npm audit` (gate in CI) | 0 findings |
 
 > Mutation testing is the honest meter of test quality: it flips operators,
@@ -23,7 +23,7 @@ Three layers, each answering a different question:
 
 ```bash
 cd backend
-npm test            # 483 tests
+npm test            # 524 tests
 npm run test:coverage  # same tests + per-file 98% coverage gate
 npm run typecheck   # tsc --noEmit
 npm run mutation    # Stryker — breaks below 98

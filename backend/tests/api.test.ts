@@ -7,7 +7,7 @@ import { createApp } from '../src/app.js'
 import { loadConfig, resetConfigCache } from '../src/config.js'
 import { DeviceStore } from '../src/store/deviceStore.js'
 import type { Services } from '../src/routes.js'
-import type { GoogleWeatherClient } from '../src/upstream/googleWeather.js'
+import { GoogleWeatherClient } from '../src/upstream/googleWeather.js'
 import type { GeocodingClient } from '../src/upstream/openMeteo.js'
 import { TtlCache } from '../src/cache.js'
 
@@ -558,6 +558,33 @@ describe('response compression', () => {
     expect(plain.headers['content-encoding']).toBeUndefined()
     expect(plain.body.status).toBe('ok')
   })
+
+  it('falls back to the identity body when zlib itself fails', async () => {
+    // Compression runs off the event loop now, so a zlib failure surfaces
+    // in a callback — the response must still complete, uncompressed,
+    // rather than dangling until the client times out.
+    vi.doMock('node:zlib', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('node:zlib')>()),
+      gzip: ((_buf: Buffer, _opts: unknown, cb: (e: Error | null) => void) => {
+        cb(new Error('zlib broken'))
+      }) as unknown as typeof import('node:zlib').gzip,
+    }))
+    try {
+      vi.resetModules()
+      const { gzipJsonMiddleware } = await import('../src/compression.js')
+      const express = (await import('express')).default
+      const failing = express()
+      failing.use(gzipJsonMiddleware)
+      failing.get('/x', (_req, res) => res.json({ padding: 'X'.repeat(4096) }))
+      const res = await request(failing).get('/x').set('Accept-Encoding', 'gzip')
+      expect(res.status).toBe(200)
+      expect(res.headers['content-encoding']).toBeUndefined()
+      expect(res.body.padding).toBe('X'.repeat(4096))
+    } finally {
+      vi.doUnmock('node:zlib')
+      vi.resetModules()
+    }
+  })
 })
 
 describe('GET /api/v1/geocode', () => {
@@ -625,6 +652,81 @@ describe('GET /api/v1/geocode/reverse', () => {
     expect((await request(revApp).get('/api/v1/geocode/reverse?lat=0&lon=-181')).status).toBe(400)
     expect((await request(revApp).get('/api/v1/geocode/reverse')).status).toBe(400)
   })
+
+  it('threads the per-request deadline/disconnect scope into both geocode calls', async () => {
+    // Autocomplete taps are the most impatient calls the app makes — the
+    // geocode routes must be wired to the same abort scope as the weather
+    // routes (upstreamScope), visible here as the flight signal reaching
+    // the client for search AND reverse.
+    const seen: string[] = []
+    const scoped: Services = {
+      ...services,
+      geocodeCache: new TtlCache(60_000),
+      geocoding: {
+        search: async (_name: string, _count: number, signal?: AbortSignal) => {
+          seen.push(`search:${signal instanceof AbortSignal}`)
+          return { results: [] }
+        },
+        reverse: async (_lat: number, _lon: number, signal?: AbortSignal) => {
+          seen.push(`reverse:${signal instanceof AbortSignal}`)
+          return { name: 'Somewhere', admin1: '', country: '' }
+        },
+      } as unknown as GeocodingClient,
+    }
+    const scopedApp = createApp(config, scoped)
+    await request(scopedApp).get('/api/v1/geocode?name=Hyderabad')
+    await request(scopedApp).get('/api/v1/geocode/reverse?lat=3.33&lon=3.33')
+    expect(seen).toEqual(['search:true', 'reverse:true'])
+  })
+})
+
+describe('deadline expiry at the route boundary', () => {
+  it('answers 504 when the whole-request budget fires mid-retry', async () => {
+    // The upstream answers 500 instantly and the retry backoff (5 s) far
+    // outlives the 80 ms whole-request deadline: the deadline aborts the
+    // backoff sleep, and the client must see 504 (our budget), not the
+    // upstream's 502.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        ({
+          ok: false,
+          status: 500,
+          headers: { get: () => null },
+          json: async () => ({}),
+          text: async () => 'down',
+        }) as Response,
+      ),
+    )
+    resetConfigCache()
+    const deadlineConfig = loadConfig({
+      WEATHER_API_KEY: 'test-key',
+      DATA_DIR: tmpDataDir,
+      UPSTREAM_TIMEOUT_MS: '40',
+      UPSTREAM_DEADLINE_MS: '80',
+      UPSTREAM_RETRIES: '2',
+      UPSTREAM_RETRY_BACKOFF_MS: '5000',
+      DEVICE_RATE_LIMIT_MAX: '100',
+      CACHE_TTL_MS: '60000',
+    } as NodeJS.ProcessEnv)
+    const slow: Services = {
+      config: deadlineConfig,
+      weather: new GoogleWeatherClient(deadlineConfig),
+      geocoding: { search: async () => ({ results: [] }) } as unknown as GeocodingClient,
+      coreCache: new TtlCache(60_000),
+      alertsCache: new TtlCache(15_000),
+      currentCache: new TtlCache(60_000),
+      geocodeCache: new TtlCache(60_000),
+      devices: new DeviceStore(tmpDataDir),
+    }
+    const deadlineApp = createApp(deadlineConfig, slow)
+    const res = await request(deadlineApp).get('/api/v1/weather/bundle?lat=25.25&lon=25.25')
+    expect(res.status).toBe(504)
+    expect(res.body.error).toBe('upstream_error')
+    expect(res.body.message).toContain('did not answer in time')
+    vi.unstubAllGlobals()
+    resetConfigCache()
+  }, 10_000)
 })
 
 describe('device registry', () => {
@@ -699,6 +801,9 @@ describe('device registry', () => {
       { ...base, city: { ...base.city, timeZone: 'x'.repeat(65) } },
       { ...base, units: 'kelvin' },
       { ...base, language: 'e' },
+      // Whitespace must not launder a too-short code past validation: the
+      // trim runs before min(2), so ' t' (2 raw chars, 1 trimmed) is invalid.
+      { ...base, language: ' t' },
     ]
     for (const body of cases) {
       const res = await request(app).post('/api/v1/devices').send(body)
@@ -1068,6 +1173,25 @@ describe('compression threshold boundary', () => {
     expect(acceptsGzip('  gzip  ')).toBe(true)
     expect(acceptsGzip('gzip ; q=0.5 , br')).toBe(true)
     expect(acceptsGzip('GZip;Q=0')).toBe(false)
+  })
+
+  it('drops a stale ETag on the compressed representation', async () => {
+    // The compressed path bypasses express serialization entirely, so any
+    // ETag a handler set for the identity body would tag the WRONG bytes —
+    // the middleware must strip it before ending the compressed response.
+    const express = (await import('express')).default
+    const { gzipJsonMiddleware } = await import('../src/compression.js')
+    const base = JSON.stringify({ padding: '' }).length
+    const sized = (n: number) => ({ padding: 'X'.repeat(n - base) })
+    const app = express()
+    app.use(gzipJsonMiddleware)
+    app.get('/x', (_req, res) => {
+      res.setHeader('ETag', '"stale-uncompressed"')
+      res.json(sized(1024))
+    })
+    const res = await request(app).get('/x').set('Accept-Encoding', 'gzip')
+    expect(res.headers['content-encoding']).toBe('gzip')
+    expect(res.headers.etag).toBeUndefined()
   })
 })
 

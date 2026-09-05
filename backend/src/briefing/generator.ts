@@ -266,7 +266,9 @@ export function generateBriefing(input: BriefingInput): BriefingResult {
     lines.push(fmt(t.gusts, { speed }))
   }
 
+  // Stryker disable ConditionalExpression: verified equivalent — Number(null|undefined) is 0/NaN and both fail >= 40, so removing the null-guard cannot flip the verdict (the lowC twin below IS load-bearing, 0 <= 2, and stays test-pinned)
   if (highC != null && highC >= 40) lines.push(t.veryHot)
+  // Stryker restore ConditionalExpression
   if (lowC != null && lowC <= 2) lines.push(t.veryCold)
 
   for (const headline of alertHeadlines) {

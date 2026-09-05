@@ -35,7 +35,10 @@ class WeatherRepository(
         languageCode: String = "en",
     ): WeatherBundle {
         val b = api.bundle(latitude, longitude, languageCode)
-        if (cacheKey != null && lastKnown != null) {
+        // A degraded bundle must never become the offline "last known good":
+        // a truncated forecast persisted as healthy would outlive the outage
+        // that caused it, long after fresh data is available again.
+        if (cacheKey != null && lastKnown != null && !b.degraded) {
             withContext(Dispatchers.IO) { lastKnown.put(cacheKey, b) }
         }
         return b.toWeatherBundle()
@@ -71,6 +74,7 @@ class WeatherRepository(
             days = forecastDays.toDayUis(),
             history = historyHours.toHourUis(),
             alerts = publicAlerts.toAlertUis(),
+            degraded = degraded,
         )
     }
 }

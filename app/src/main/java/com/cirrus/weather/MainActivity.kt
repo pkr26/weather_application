@@ -36,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -265,6 +266,13 @@ private fun CirrusAppRoot(container: AppContainer, deepLinkCityId: androidx.comp
     // With system animations disabled the sheets snap — motion choreography
     // is exactly what "reduce motion" asks to remove.
     val reducedMotion = rememberReducedMotion()
+    // AnimatedContent disposes the outgoing branch once the transition ends,
+    // which would throw away every rememberSaveable below it — the weather
+    // screen's scroll position, row expansions and entrance played-flags
+    // reset to first-frame on the single most common navigation gesture. A
+    // shared holder keyed per screen keeps that state alive across sheet
+    // toggles and hands it back on re-entry.
+    val stateHolder = rememberSaveableStateHolder()
     AnimatedContent(
         targetState = when {
             showSettings -> "settings"
@@ -284,26 +292,28 @@ private fun CirrusAppRoot(container: AppContainer, deepLinkCityId: androidx.comp
         },
         label = "rootNav",
     ) { screen ->
-        when (screen) {
-            "settings" -> com.cirrus.weather.ui.settings.SettingsScreen(
-                viewModel = settingsViewModel,
-                onBack = { showSettings = false },
-            )
-            "cities" -> CityListScreen(
-                viewModel = cityListViewModel,
-                onCityChosen = { showCityList = false },
-                onBack = { showCityList = false },
-                onLocateMe = onLocateMe,
-                onOpenSettings = { showSettings = true },
-            )
-            else -> WeatherScreen(
-                city = city,
-                state = weatherState,
-                unitPref = unitPref,
-                refreshing = refreshing,
-                onRefresh = weatherViewModel::refresh,
-                onOpenCities = { showCityList = true },
-            )
+        stateHolder.SaveableStateProvider(screen) {
+            when (screen) {
+                "settings" -> com.cirrus.weather.ui.settings.SettingsScreen(
+                    viewModel = settingsViewModel,
+                    onBack = { showSettings = false },
+                )
+                "cities" -> CityListScreen(
+                    viewModel = cityListViewModel,
+                    onCityChosen = { showCityList = false },
+                    onBack = { showCityList = false },
+                    onLocateMe = onLocateMe,
+                    onOpenSettings = { showSettings = true },
+                )
+                else -> WeatherScreen(
+                    city = city,
+                    state = weatherState,
+                    unitPref = unitPref,
+                    refreshing = refreshing,
+                    onRefresh = weatherViewModel::refresh,
+                    onOpenCities = { showCityList = true },
+                )
+            }
         }
     }
 }

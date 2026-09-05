@@ -12,7 +12,7 @@ object BriefingSchedule {
 
     /**
      * Milliseconds from [now] until the next occurrence of hour:minute.
-     * At/before the target today, schedules tomorrow.
+     * Before today's target time that is today; at/after it, tomorrow.
      *
      * The delay is computed on zoned date-times: on DST-transition days the
      * elapsed-milliseconds answer differs from the wall-clock answer by the

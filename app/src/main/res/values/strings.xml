@@ -23,6 +23,7 @@
     <string name="error_offline">Can\'t reach the weather service. Check your connection and try again.</string>
     <string name="error_generic">Something went wrong loading the forecast.</string>
     <string name="stale_banner">Couldn\'t refresh — showing the last forecast</string>
+    <string name="degraded_banner">Limited forecast data</string>
     <string name="footer_weather_for">Weather for %1$s</string>
     <string name="footer_updated">Updated %1$s · Data by Google Weather API</string>
 

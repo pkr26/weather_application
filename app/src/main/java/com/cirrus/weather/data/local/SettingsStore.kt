@@ -1,8 +1,10 @@
 package com.cirrus.weather.data.local
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -14,6 +16,7 @@ import com.cirrus.weather.notify.DeviceIdentity
 import com.cirrus.weather.notify.DeviceRegistrar
 import com.cirrus.weather.notify.NotificationPrefs
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
@@ -23,7 +26,15 @@ import kotlinx.serialization.json.Json
 import java.util.Locale
 import java.util.UUID
 
-private val Context.dataStore by preferencesDataStore(name = "cirrus_settings")
+private val Context.dataStore by preferencesDataStore(
+    name = "cirrus_settings",
+    // A corrupted file self-heals to defaults instead of throwing on every
+    // read: without this, one bad block permanently killed the workers'
+    // briefing chain (reads sat outside their exception armor) and crashed
+    // the UI on its first collect. Losing preferences is recoverable; a
+    // dead app is not.
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
 
 /**
  * Persists saved cities, the active city, unit preference and notification
@@ -56,9 +67,13 @@ class SettingsStore(
     /** Serializes id/secret first-use minting across concurrent callers. */
     private val identityMutex = Mutex()
 
+    // distinctUntilChanged: store.data re-emits on ANY preference write, and
+    // cities readers treat every emission as a change (the city-list mini
+    // cards re-check staleness per emission — without this, an unrelated
+    // markSeen write every 2h during a storm re-triggers fetch logic).
     val cities: Flow<List<SavedCity>> = store.data.map { prefs ->
         decodeCities(prefs[citiesKey]).cities
-    }
+    }.distinctUntilChanged()
 
     /**
      * True when a persisted city list existed but couldn't be decoded and the

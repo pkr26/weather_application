@@ -28,6 +28,10 @@ data class WeatherBundle(
     val history: List<HourUi>,
     val alerts: List<AlertUi>,
     val fetchedAt: Instant = Instant.now(),
+    /** True when the backend served a partial bundle (e.g. truncated
+     *  forecast pages). The UI must label it as limited instead of
+     *  presenting a shortened forecast as complete. */
+    val degraded: Boolean = false,
 )
 
 data class CurrentUi(

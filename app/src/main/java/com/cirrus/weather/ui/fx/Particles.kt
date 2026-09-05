@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -22,7 +23,9 @@ private class Particle(
     var y: Float,
     val speed: Float,
     val size: Float,
-    val alpha: Float,
+    // Baked at spawn: rebuilding a per-particle color every tick is thousands
+    // of allocations per second in heavy rain.
+    val color: Color,
     val phase: Float,
     val freq: Float,
 )
@@ -34,9 +37,16 @@ private fun particlesOf(count: Int, rand: Random, spawn: (Random) -> Particle): 
  * Frame-clock driven animation loop that survives recomposition, capped at
  * ~32 fps: ambient particles never need display refresh rate, and skipping
  * alternate vsync frames halves the redraw cost on 90–120 Hz screens.
+ *
+ * The callback is read through [rememberUpdatedState]: keying the effect on
+ * the lambda itself would work too, but would restart the timing state each
+ * time the caller recomposes with new captures (e.g. a wind update changes
+ * the rain's slant) — the holder keeps the ~32 Hz cadence continuous while
+ * always invoking the *current* lambda, never the first composition's.
  */
 @Composable
 private fun FrameLoop(onFrame: (Float) -> Unit) {
+    val currentOnFrame by rememberUpdatedState(onFrame)
     LaunchedEffect(Unit) {
         var last = awaitFrame()
         var lastEmitted = last
@@ -46,7 +56,7 @@ private fun FrameLoop(onFrame: (Float) -> Unit) {
                 val dt = ((now - last) / 1_000_000f).coerceIn(0f, 64f) / 1000f
                 last = now
                 lastEmitted = now
-                onFrame(dt)
+                currentOnFrame(dt)
             }
         }
     }
@@ -62,12 +72,13 @@ fun RainEffect(intensity: Float, windDegrees: Float?, modifier: Modifier = Modif
     val drops = remember(intensity) {
         val count = (70 * intensity).toInt().coerceIn(24, 140)
         particlesOf(count, Random(System.nanoTime())) { r ->
+            val alpha = 0.18f + r.nextFloat() * 0.25f
             Particle(
                 x = r.nextFloat(),
                 y = r.nextFloat(),
                 speed = 0.9f + r.nextFloat() * 0.7f,   // screen heights per second
                 size = 10f + r.nextFloat() * 16f,      // streak length, dp
-                alpha = 0.18f + r.nextFloat() * 0.25f,
+                color = Color.White.copy(alpha = alpha),
                 phase = 0f,
                 freq = 0f,
             )
@@ -103,7 +114,7 @@ fun RainEffect(intensity: Float, windDegrees: Float?, modifier: Modifier = Modif
             val y0 = p.y * h
             val dx = slant * p.size * density
             drawLine(
-                color = Color.White.copy(alpha = p.alpha),
+                color = p.color,
                 start = Offset(x0, y0),
                 end = Offset(x0 + dx, y0 + p.size * density),
                 strokeWidth = 1.4f * density * (0.6f + intensity * 0.4f),
@@ -120,12 +131,13 @@ fun SnowEffect(intensity: Float, modifier: Modifier = Modifier) {
     val flakes = remember(intensity) {
         val count = (48 * intensity).toInt().coerceIn(16, 96)
         particlesOf(count, Random(System.nanoTime())) { r ->
+            val alpha = 0.45f + r.nextFloat() * 0.45f
             Particle(
                 x = r.nextFloat(),
                 y = r.nextFloat(),
                 speed = 0.05f + r.nextFloat() * 0.09f,  // screen heights per second
                 size = 2.5f + r.nextFloat() * 4f,        // radius, dp
-                alpha = 0.45f + r.nextFloat() * 0.45f,
+                color = Color.White.copy(alpha = alpha),
                 phase = r.nextFloat() * (2f * Math.PI.toFloat()),
                 freq = 0.4f + r.nextFloat() * 0.8f,
             )
@@ -153,7 +165,7 @@ fun SnowEffect(intensity: Float, modifier: Modifier = Modifier) {
         val w = size.width
         flakes.forEach { p ->
             drawCircle(
-                color = Color.White.copy(alpha = p.alpha),
+                color = p.color,
                 radius = p.size * density * 0.5f,
                 center = Offset(p.x * w, p.y * h),
             )
@@ -168,12 +180,13 @@ fun SnowEffect(intensity: Float, modifier: Modifier = Modifier) {
 fun StarField(modifier: Modifier = Modifier) {
     val stars = remember {
         particlesOf(90, Random(System.nanoTime())) { r ->
+            val alpha = 0.25f + r.nextFloat() * 0.6f
             Particle(
                 x = r.nextFloat(),
                 y = r.nextFloat() * 0.62f,
                 speed = 0.4f + r.nextFloat() * 1.6f,
                 size = 0.8f + r.nextFloat() * 1.6f,
-                alpha = 0.25f + r.nextFloat() * 0.6f,
+                color = Color.White.copy(alpha = alpha),
                 phase = r.nextFloat() * (2f * Math.PI.toFloat()),
                 freq = 0f,
             )
@@ -188,7 +201,11 @@ fun StarField(modifier: Modifier = Modifier) {
         stars.forEach { p ->
             val twinkle = 0.35f + 0.65f * abs(sin(time * p.speed + p.phase))
             drawCircle(
-                color = Color.White.copy(alpha = p.alpha * twinkle),
+                color = p.color,
+                // Twinkle applied as the draw-scope alpha (it composes with
+                // the color's own alpha) instead of building a new Color per
+                // star per tick — same rendered value, zero allocation.
+                alpha = twinkle,
                 radius = p.size * density * 0.5f,
                 center = Offset(p.x * w, p.y * h),
             )

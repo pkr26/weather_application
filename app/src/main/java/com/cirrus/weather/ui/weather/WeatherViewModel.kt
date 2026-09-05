@@ -33,7 +33,10 @@ sealed interface WeatherUiState {
      * this is the previously-loaded bundle — the UI must tell the user the
      * numbers on screen may be out of date instead of failing silently.
      */
-    data class Ready(val bundle: WeatherBundle, val stale: Boolean = false) : WeatherUiState
+    data class Ready(val bundle: WeatherBundle, val stale: Boolean = false) : WeatherUiState {
+        /** Convenience for [WeatherBundle.degraded] — the limited-data banner. */
+        val degraded: Boolean get() = bundle.degraded
+    }
 
     /**
      * Full-error state. Carries a string resource, not literal copy — user
